@@ -1,0 +1,136 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>InkFlow AI 小说家</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              ink: {
+                50: 'rgb(var(--color-ink-50) / <alpha-value>)',
+                100: 'rgb(var(--color-ink-100) / <alpha-value>)',
+                200: 'rgb(var(--color-ink-200) / <alpha-value>)',
+                300: 'rgb(var(--color-ink-300) / <alpha-value>)',
+                400: 'rgb(var(--color-ink-400) / <alpha-value>)',
+                500: 'rgb(var(--color-ink-500) / <alpha-value>)',
+                600: 'rgb(var(--color-ink-600) / <alpha-value>)',
+                700: 'rgb(var(--color-ink-700) / <alpha-value>)',
+                800: 'rgb(var(--color-ink-800) / <alpha-value>)',
+                900: 'rgb(var(--color-ink-900) / <alpha-value>)',
+                950: 'rgb(var(--color-ink-950) / <alpha-value>)',
+              },
+              paper: 'rgb(var(--color-paper) / <alpha-value>)',
+              primary: {
+                 DEFAULT: 'rgb(var(--color-primary) / <alpha-value>)',
+                 hover: 'rgb(var(--color-primary-hover) / <alpha-value>)',
+                 light: 'rgb(var(--color-primary-light) / <alpha-value>)',
+              }
+            },
+            fontFamily: {
+              serif: ['"Noto Serif SC"', 'SimSun', 'Georgia', 'Cambria', '"Times New Roman"', 'Times', 'serif'],
+              sans: ['"Noto Sans SC"', 'system-ui', '-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'Roboto', '"Helvetica Neue"', 'Arial', 'sans-serif'],
+            }
+          },
+        },
+      }
+    </script>
+    <style>
+      /* Base Variables (Default Light) */
+      :root {
+        --color-ink-50: 248 250 252;
+        --color-ink-100: 241 245 249;
+        --color-ink-200: 226 232 240;
+        --color-ink-300: 203 213 225;
+        --color-ink-400: 148 163 184;
+        --color-ink-500: 100 116 139;
+        --color-ink-600: 71 85 105;
+        --color-ink-700: 51 65 85;
+        --color-ink-800: 30 41 59;
+        --color-ink-900: 15 23 42;
+        --color-ink-950: 2 6 23;
+        --color-paper: 253 251 247;
+        --color-primary: 79 70 229; /* Indigo 600 */
+        --color-primary-hover: 67 56 202; /* Indigo 700 */
+        --color-primary-light: 238 242 255; /* Indigo 50 */
+      }
+
+      /* Scrollbar */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: rgb(var(--color-ink-300));
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: rgb(var(--color-ink-400));
+      }
+      
+      /* TipTap Editor Styles */
+      .ProseMirror {
+        outline: none;
+        min-height: 60vh;
+        line-height: 1.8;
+        font-family: 'Noto Serif SC', serif;
+        color: rgb(var(--color-ink-900));
+      }
+      .ProseMirror p {
+        margin-bottom: 1.2em;
+        text-align: justify;
+      }
+      .ProseMirror h1 { font-size: 2em; font-weight: bold; margin-bottom: 0.5em; margin-top: 1em; color: rgb(var(--color-primary)); }
+      .ProseMirror h2 { font-size: 1.5em; font-weight: bold; margin-bottom: 0.5em; margin-top: 1em; color: rgb(var(--color-ink-800)); }
+      .ProseMirror h3 { font-size: 1.25em; font-weight: bold; margin-bottom: 0.5em; margin-top: 1em; }
+      .ProseMirror blockquote {
+        border-left: 3px solid rgb(var(--color-primary));
+        padding-left: 1em;
+        font-style: italic;
+        color: rgb(var(--color-ink-500));
+        margin: 1em 0;
+      }
+      .ProseMirror ul { list-style-type: disc; padding-left: 1.5em; margin: 1em 0; }
+      .ProseMirror ol { list-style-type: decimal; padding-left: 1.5em; margin: 1em 0; }
+      
+      .ProseMirror p.is-editor-empty:first-child::before {
+        color: rgb(var(--color-ink-300));
+        content: attr(data-placeholder);
+        float: left;
+        height: 0;
+        pointer-events: none;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.554.0",
+    "react-dom": "https://aistudiocdn.com/react-dom@^19.2.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0",
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "clsx": "https://esm.sh/clsx@2.1.0",
+    "tailwind-merge": "https://esm.sh/tailwind-merge@2.2.0",
+    "@tiptap/react": "https://esm.sh/@tiptap/react@2.2.4?external=react,react-dom",
+    "@tiptap/starter-kit": "https://esm.sh/@tiptap/starter-kit@2.2.4",
+    "@tiptap/extension-placeholder": "https://esm.sh/@tiptap/extension-placeholder@2.2.4",
+    "@tiptap/core": "https://esm.sh/@tiptap/core@2.2.4",
+    "@tiptap/pm/state": "https://esm.sh/@tiptap/pm/state@2.2.4"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="bg-ink-50 text-ink-900 h-screen overflow-hidden transition-colors duration-300">
+    <div id="root"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+{
+  "name": "InkFlow - AI长篇小说家",
+  "description": "专业级AI小说写作助手，利用具备深度推理能力的 Gemini 3 Pro 构建和生成百万字规模的史诗故事。",
+  "requestFramePermissions": []
+}
