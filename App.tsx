@@ -13,8 +13,17 @@ import WikiSystem from './components/WikiSystem';
 import AIChat from './components/AIChat';
 import VideoStudio from './components/VideoStudio';
 import ProjectDashboard from './components/ProjectDashboard'; 
-import { ViewMode, NovelState, NovelConfig, Character, Chapter, WorldStructure, AppSettings } from './types';
+import { ViewMode, NovelState, NovelConfig, Character, Chapter, WorldStructure, AppSettings, Volume, PlotLoop, PlotLoopStatus } from './types';
 import { db } from './services/db';
+import { 
+  createPlotLoop, 
+  updatePlotLoopInArray, 
+  deletePlotLoop, 
+  markAsClosedInArray, 
+  markAsAbandonedInArray,
+  checkAndUpdateAllUrgentStatus,
+  CreatePlotLoopInput
+} from './services/plotLoopService';
 import { Loader2, Cloud } from 'lucide-react';
 
 const DEFAULT_API_KEY = process.env.API_KEY || '';
@@ -175,11 +184,29 @@ const App: React.FC = () => {
           setNovelState(prev => {
               if (!prev) return null;
               // Clean up other chapters' content to free memory, update target
-              const updatedChapters = prev.chapters.map(c => {
+              const updatedChapters = prev.chapters.map((c: Chapter) => {
                   if (c.id === chapterId) return { ...c, content: content };
                   return { ...c, content: "" }; // Unload others
               });
-              return { ...prev, chapters: updatedChapters, currentChapterId: chapterId };
+              
+              // Check and update URGENT status for plot loops when chapter changes
+              const currentChapter = updatedChapters.find((c: Chapter) => c.id === chapterId);
+              let updatedPlotLoops = prev.plotLoops;
+              if (currentChapter) {
+                  updatedPlotLoops = checkAndUpdateAllUrgentStatus(
+                      prev.plotLoops,
+                      currentChapter,
+                      updatedChapters,
+                      prev.volumes
+                  );
+              }
+              
+              return { 
+                  ...prev, 
+                  chapters: updatedChapters, 
+                  currentChapterId: chapterId,
+                  plotLoops: updatedPlotLoops
+              };
           });
           
           setViewMode(ViewMode.WRITE);
@@ -207,6 +234,53 @@ const App: React.FC = () => {
   const updateStructure = (newStructure: WorldStructure) => updateWrapper(prev => ({ ...prev, structure: newStructure }));
   const updateCharacters = (chars: Character[]) => updateWrapper(prev => ({ ...prev, characters: chars }));
   const updateChapters = (chapters: Chapter[]) => updateWrapper(prev => ({ ...prev, chapters }));
+  const updateVolumes = (volumes: Volume[]) => updateWrapper(prev => ({ ...prev, volumes }));
+  const updatePlotLoops = (plotLoops: PlotLoop[]) => updateWrapper(prev => ({ ...prev, plotLoops }));
+
+  // --- PlotLoop CRUD Operations ---
+  const handleCreatePlotLoop = (loopData: Partial<PlotLoop>) => {
+      if (!novelState) return;
+      
+      const input: CreatePlotLoopInput = {
+          title: loopData.title || '未命名伏笔',
+          description: loopData.description || '',
+          setupChapterId: loopData.setupChapterId || novelState.currentChapterId || '',
+          importance: loopData.importance || 3,
+          targetChapterId: loopData.targetChapterId,
+          targetVolumeId: loopData.targetVolumeId,
+          relatedCharacterIds: loopData.relatedCharacterIds,
+          relatedWikiEntryIds: loopData.relatedWikiEntryIds,
+          parentLoopId: loopData.parentLoopId,
+          aiSuggested: loopData.aiSuggested
+      };
+      
+      const newLoop = createPlotLoop(input);
+      updatePlotLoops([...novelState.plotLoops, newLoop]);
+  };
+
+  const handleUpdatePlotLoop = (id: string, updates: Partial<PlotLoop>) => {
+      if (!novelState) return;
+      const updatedLoops = updatePlotLoopInArray(id, updates, novelState.plotLoops);
+      updatePlotLoops(updatedLoops);
+  };
+
+  const handleDeletePlotLoop = (id: string) => {
+      if (!novelState) return;
+      const updatedLoops = deletePlotLoop(id, novelState.plotLoops);
+      updatePlotLoops(updatedLoops);
+  };
+
+  const handleMarkPlotLoopClosed = (id: string, closeChapterId: string) => {
+      if (!novelState) return;
+      const updatedLoops = markAsClosedInArray(id, closeChapterId, novelState.plotLoops);
+      updatePlotLoops(updatedLoops);
+  };
+
+  const handleMarkPlotLoopAbandoned = (id: string, reason: string) => {
+      if (!novelState) return;
+      const updatedLoops = markAsAbandonedInArray(id, reason, novelState.plotLoops);
+      updatePlotLoops(updatedLoops);
+  };
   
   const updateSingleChapter = (updated: Chapter) => {
       updateWrapper(prev => ({
@@ -330,6 +404,8 @@ const App: React.FC = () => {
                 structure={novelState.structure}
                 onSelectChapter={handleSelectChapter}
                 settings={appSettings}
+                volumes={novelState.volumes}
+                setVolumes={updateVolumes}
             />
         </KeepAliveView>
         
@@ -352,6 +428,13 @@ const App: React.FC = () => {
                     onUpdateChapter={updateSingleChapter}
                     onChangeChapter={handleChangeChapter}
                     settings={appSettings}
+                    volumes={novelState.volumes}
+                    plotLoops={novelState.plotLoops}
+                    onCreatePlotLoop={handleCreatePlotLoop}
+                    onUpdatePlotLoop={handleUpdatePlotLoop}
+                    onDeletePlotLoop={handleDeletePlotLoop}
+                    onMarkPlotLoopClosed={handleMarkPlotLoopClosed}
+                    onMarkPlotLoopAbandoned={handleMarkPlotLoopAbandoned}
                 />
             )}
         </KeepAliveView>
@@ -365,7 +448,13 @@ const App: React.FC = () => {
         </KeepAliveView>
         
         <KeepAliveView mode={ViewMode.EXPORT} activeMode={viewMode}>
-            <ExportPublish novelState={novelState} />
+            <ExportPublish 
+                novelState={novelState} 
+                onImportProject={(importedState) => {
+                    setNovelState(importedState);
+                    setViewMode(ViewMode.SETUP);
+                }}
+            />
         </KeepAliveView>
         
         <KeepAliveView mode={ViewMode.APP_SETTINGS} activeMode={viewMode}>

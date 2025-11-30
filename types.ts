@@ -7,6 +7,42 @@ export enum GenerationStatus {
   ERROR = 'ERROR'
 }
 
+// 伏笔状态枚举
+export enum PlotLoopStatus {
+  OPEN = 'OPEN',           // 已埋下，未回收
+  URGENT = 'URGENT',       // 急需回收（接近预定回收章节）
+  CLOSED = 'CLOSED',       // 已回收
+  ABANDONED = 'ABANDONED'  // 废弃
+}
+
+// 伏笔/悬念接口
+export interface PlotLoop {
+  id: string;                      // UUID
+  title: string;                   // 伏笔简述，如"神秘的断剑"
+  description: string;             // 详细描述
+  
+  // 生命周期
+  setupChapterId: string;          // 埋下伏笔的章节 ID
+  targetChapterId?: string;        // 计划回收的章节 ID（可选）
+  targetVolumeId?: string;         // 计划回收的分卷 ID（可选）
+  closeChapterId?: string;         // 实际回收的章节 ID
+  
+  // 状态
+  status: PlotLoopStatus;
+  importance: number;              // 1-5，重要程度
+  abandonReason?: string;          // 废弃原因
+  
+  // 关联
+  relatedCharacterIds?: string[];  // 关联角色 ID 列表
+  relatedWikiEntryIds?: string[];  // 关联 Wiki 词条 ID 列表
+  parentLoopId?: string;           // 父伏笔 ID（伏笔链）
+  
+  // 元数据
+  createdAt: number;               // 创建时间戳
+  updatedAt: number;               // 更新时间戳
+  aiSuggested?: boolean;           // 是否为 AI 建议创建
+}
+
 export enum ViewMode {
   SETUP = 'SETUP',
   STRUCTURE = 'STRUCTURE', 
@@ -106,6 +142,20 @@ export interface Chapter {
   tension?: number; // 1-10 score representing plot tension/excitement
   beats?: string[]; // New: Detailed plot beats (Step Outline)
   parentId?: string | null; // New: For branching narratives
+  volumeId?: string | null; // 所属分卷 ID
+  hooks?: string[]; // 本章留下的钩子/伏笔
+}
+
+// 分卷接口 - 位于书和章节之间的结构层级
+export interface Volume {
+  id: string;                    // UUID
+  title: string;                 // 卷标题，如"第一卷：崛起"
+  summary: string;               // 卷摘要，100-300字
+  coreConflict: string;          // 本卷核心冲突
+  order: number;                 // 卷序号，从 1 开始
+  chapterIds: string[];          // 包含的章节 ID 列表
+  volumeSummary?: string;        // 完成后生成的详细总结（500-1000字）
+  expectedWordCount?: number;    // 预期字数
 }
 
 export interface ChapterSnapshot {
@@ -179,4 +229,6 @@ export interface NovelState {
   characters: Character[];
   chapters: Chapter[];
   currentChapterId: string | null;
+  volumes: Volume[]; // 分卷列表
+  plotLoops: PlotLoop[]; // 伏笔列表
 }

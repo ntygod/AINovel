@@ -1,15 +1,18 @@
 
-import React, { useState } from 'react';
-import { NovelState } from '../types';
+import React, { useState, useRef } from 'react';
+import { NovelState, PlotLoop } from '../types';
 import { db } from '../services/db';
-import { Download, FileJson, FileText, Save, Loader2 } from 'lucide-react';
+import { Download, FileJson, FileText, Save, Loader2, Upload } from 'lucide-react';
 
 interface ExportPublishProps {
   novelState: NovelState;
+  onImportProject?: (state: NovelState) => void;
 }
 
-const ExportPublish: React.FC<ExportPublishProps> = ({ novelState }) => {
+const ExportPublish: React.FC<ExportPublishProps> = ({ novelState, onImportProject }) => {
   const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const totalWords = novelState.chapters.reduce((acc, c) => acc + c.wordCount, 0);
 
   const getFullProject = async () => {
@@ -69,6 +72,65 @@ const ExportPublish: React.FC<ExportPublishProps> = ({ novelState }) => {
     document.body.removeChild(link);
   };
 
+  /**
+   * Handles importing a project from a JSON backup file.
+   * Restores all data including plotLoops.
+   * Requirements: 8.3, 8.4
+   */
+  const handleImportJson = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setImporting(true);
+    try {
+      const text = await file.text();
+      const importedState = JSON.parse(text) as NovelState;
+
+      // Validate basic structure
+      if (!importedState.config || !importedState.chapters) {
+        throw new Error('无效的备份文件格式');
+      }
+
+      // Generate new ID to avoid conflicts with existing projects
+      const newId = crypto.randomUUID();
+      const restoredState: NovelState = {
+        ...importedState,
+        id: newId,
+        lastModified: Date.now(),
+        // Ensure volumes array exists (backward compatibility)
+        volumes: importedState.volumes ?? [],
+        // Ensure plotLoops array exists and restore it (Requirements 8.3, 8.4)
+        plotLoops: (importedState.plotLoops ?? []).map((loop: PlotLoop) => ({
+          ...loop,
+          // Preserve all plot loop fields during import
+        })),
+      };
+
+      // Save the imported project to IndexedDB
+      await db.saveProject(restoredState);
+
+      // Notify parent component about the import
+      if (onImportProject) {
+        onImportProject(restoredState);
+      }
+
+      alert(`项目 "${restoredState.config.title}" 导入成功！`);
+    } catch (e) {
+      console.error('Import failed:', e);
+      alert(`导入失败：${e instanceof Error ? e.message : '未知错误'}`);
+    } finally {
+      setImporting(false);
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const triggerFileInput = () => {
+    fileInputRef.current?.click();
+  };
+
   return (
     <div className="max-w-3xl mx-auto p-8 animate-fade-in">
       <div className="mb-8">
@@ -115,9 +177,38 @@ const ExportPublish: React.FC<ExportPublishProps> = ({ novelState }) => {
           </button>
         </div>
       </div>
+
+      {/* Import Section */}
+      <div className="mt-8">
+        <h3 className="text-xl font-bold text-ink-900 mb-4">导入项目</h3>
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-ink-200">
+          <div className="flex items-center space-x-3 mb-4 text-amber-600">
+            <Upload size={24} />
+            <h3 className="text-lg font-bold">从备份恢复 (.json)</h3>
+          </div>
+          <p className="text-ink-600 mb-6 text-sm">
+            从之前导出的 JSON 备份文件恢复项目，包括所有设置、角色、大纲、正文和伏笔数据。
+          </p>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json"
+            onChange={handleImportJson}
+            className="hidden"
+          />
+          <button
+            onClick={triggerFileInput}
+            disabled={importing}
+            className="w-full flex items-center justify-center space-x-2 bg-amber-600 hover:bg-amber-700 text-white px-4 py-3 rounded-lg font-medium transition shadow-sm disabled:opacity-50"
+          >
+            {importing ? <Loader2 className="animate-spin" size={18} /> : <Upload size={18} />}
+            <span>{importing ? '正在导入...' : '选择备份文件'}</span>
+          </button>
+        </div>
+      </div>
       
       <div className="mt-8 bg-ink-100 p-4 rounded-lg text-sm text-ink-500">
-          <p>提示：导出操作会临时从数据库读取百万字内容，请耐心等待。</p>
+          <p>提示：导出操作会临时从数据库读取百万字内容，请耐心等待。导入会创建新项目，不会覆盖现有数据。</p>
       </div>
     </div>
   );

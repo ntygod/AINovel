@@ -1,11 +1,18 @@
 import { GoogleGenAI, Type, Modality, setDefaultBaseUrls } from "@google/genai";
 import { 
   NovelConfig, WorldStructure, AppSettings, Faction, MapRegion, Character, Chapter, 
-  WikiEntry, VideoScene, VectorRecord 
+  WikiEntry, VideoScene, VectorRecord, Volume, PlotLoop 
 } from '../types';
 import { db } from './db';
 import { tokenCounter } from './tokenCounter';
 import { retrieveRelevantChapters, retrieveRelevantCharacters } from './ragService';
+import { 
+  findPreviousChapter, 
+  extractLastContent, 
+  getChapterAncestors as getVolumeChapterAncestors,
+  getVolumeProgress 
+} from './volumeService';
+import { buildLoopContextForPrompt } from './plotLoopService';
 
 // --- Shared Utilities ---
 
@@ -508,7 +515,12 @@ export const generateCharacters = async (config: NovelConfig, settings: AppSetti
 };
 
 export const generateRandomNames = async (config: NovelConfig, settings: AppSettings): Promise<string[]> => {
-     const prompt = `Generate 5 random names suitable for genre: ${config.genre}. Return JSON array of strings.`;
+     const prompt = `为 ${config.genre} 类型的小说生成 5 个合适的角色名字。
+要求：
+- 名字要符合小说类型的风格
+- 名字要有特色，易于记忆
+- 返回 JSON 字符串数组格式`;
+     
      if (settings.provider === 'google') {
          const ai = getGoogleAI(settings);
          const res = await ai.models.generateContent({
@@ -657,15 +669,128 @@ export const extendOutline = async (config: NovelConfig, characters: Character[]
     return [];
 };
 
-export const generateChapterBeats = async (chapter: Chapter, ancestors: Chapter[], config: NovelConfig, characters: Character[], settings: AppSettings): Promise<string[]> => {
+/**
+ * Enhanced generateChapterBeats function with deep context support.
+ * 
+ * Requirements: 2.1, 2.2, 3.1, 3.2, 3.3, 3.4, 3.5
+ * - Injects volume context (summary, core conflict, progress) for chapters in volumes
+ * - Extracts last 500 characters from previous chapter for continuity
+ * - Reads and injects hooks from previous chapter
+ * - Builds ancestor summaries for branching narratives
+ * - Returns 5-8 specific plot beats
+ * 
+ * @param chapter - The chapter to generate beats for
+ * @param allChapters - All chapters in the project (for finding previous chapter and ancestors)
+ * @param volumes - All volumes in the project (for volume context injection)
+ * @param config - Novel configuration
+ * @param characters - All characters in the project
+ * @param settings - App settings including API configuration
+ * @returns Array of 5-8 plot beat strings
+ */
+/**
+ * Enhanced generateChapterBeats function with deep context support and plot loop integration.
+ * 
+ * Requirements: 2.1, 2.2, 3.1, 3.2, 3.3, 3.4, 3.5, 4.1, 4.2, 4.4
+ * - Injects volume context (summary, core conflict, progress) for chapters in volumes
+ * - Extracts last 500 characters from previous chapter for continuity
+ * - Reads and injects hooks from previous chapter
+ * - Builds ancestor summaries for branching narratives
+ * - Injects all OPEN and URGENT plot loops into the AI prompt context (Requirement 4.1)
+ * - Instructs AI to prioritize URGENT plot loops (Requirement 4.2)
+ * - Includes relevant OPEN plot loops for narrative continuity (Requirement 4.4)
+ * - Returns 5-8 specific plot beats
+ * 
+ * @param chapter - The chapter to generate beats for
+ * @param allChapters - All chapters in the project (for finding previous chapter and ancestors)
+ * @param volumes - All volumes in the project (for volume context injection)
+ * @param config - Novel configuration
+ * @param characters - All characters in the project
+ * @param settings - App settings including API configuration
+ * @param plotLoops - All plot loops in the project (optional, for plot loop context injection)
+ * @returns Array of 5-8 plot beat strings
+ */
+export const generateChapterBeats = async (
+    chapter: Chapter, 
+    allChapters: Chapter[], 
+    volumes: Volume[],
+    config: NovelConfig, 
+    characters: Character[], 
+    settings: AppSettings,
+    plotLoops: PlotLoop[] = []
+): Promise<string[]> => {
     const context = buildNovelContext(config);
+    
+    // === 1. Find previous chapter and extract last content (Requirement 3.1) ===
+    const previousChapter = findPreviousChapter(chapter, allChapters);
+    const lastContent = previousChapter ? extractLastContent(previousChapter, 500) : '';
+    
+    // === 2. Extract hooks from previous chapter (Requirements 3.2, 3.3) ===
+    const hooks = previousChapter?.hooks || [];
+    
+    // === 3. Build ancestor summaries for branching narratives (Requirement 3.4) ===
+    const ancestors = getVolumeChapterAncestors(chapter.id, allChapters);
+    const ancestorSummaries = ancestors.length > 0 
+        ? ancestors.map(a => `第${a.order}章 ${a.title}: ${a.summary}`).join('\n')
+        : '';
+    
+    // === 4. Build volume context (Requirements 2.1, 2.2, 2.5) ===
+    let volumeContext = '';
+    if (chapter.volumeId) {
+        const volume = volumes.find(v => v.id === chapter.volumeId);
+        if (volume) {
+            // Calculate progress within volume
+            const progress = getVolumeProgress(chapter, volumes, allChapters);
+            const progressText = progress 
+                ? `本卷进度: 第 ${progress.position}/${progress.total} 章 (${progress.percentage.toFixed(0)}%)`
+                : '';
+            
+            volumeContext = `
+当前分卷: ${volume.title}
+分卷摘要: ${volume.summary}
+核心冲突: ${volume.coreConflict}
+${progressText}`;
+            
+            // Check if this is the first chapter of a new volume and previous volume has summary (Requirement 2.5)
+            if (progress && progress.position === 1 && volume.order > 1) {
+                const previousVolume = volumes.find(v => v.order === volume.order - 1);
+                if (previousVolume?.volumeSummary) {
+                    volumeContext += `\n\n上一卷总结: ${previousVolume.volumeSummary}`;
+                }
+            }
+        }
+    }
+    
+    // === 5. Build plot loop context (Requirements 4.1, 4.2, 4.4) ===
+    const plotLoopContext = buildLoopContextForPrompt(chapter.id, plotLoops);
+    
+    // === 6. Build enhanced prompt (Requirement 3.5) ===
     const prompt = `
-        为章节 "${chapter.title}" 设计详细的剧情细纲 (Beats)。
-        摘要: ${chapter.summary}
-        ${context}
-        
-        返回 JSON 字符串数组，列出 5-8 个具体的情节步骤。
-    `;
+${context}
+
+${volumeContext ? `=== 分卷信息 ===\n${volumeContext}\n` : ''}
+
+${plotLoopContext ? `\n${plotLoopContext}\n` : ''}
+
+为章节 "${chapter.title}" 设计详细的剧情细纲 (Beats)。
+章节摘要: ${chapter.summary}
+
+${ancestorSummaries ? `=== 前置剧情 ===\n${ancestorSummaries}\n` : ''}
+
+${lastContent ? `=== 上一章结尾 ===\n${lastContent}\n` : ''}
+
+${hooks.length > 0 ? `=== 需要回应的伏笔 ===\n${hooks.map((h, i) => `${i + 1}. ${h}`).join('\n')}\n` : ''}
+
+=== 要求 ===
+1. 生成 5-8 个具体的剧情步骤
+2. 每个步骤应包含具体的场景、动作或对话要点
+3. 确保与上一章自然衔接${lastContent ? '，承接上文的情节发展' : ''}
+4. 避免与前文重复的情节或描写
+${hooks.length > 0 ? `5. 必须回应上述伏笔，在细纲中体现对这些悬念的处理` : ''}
+${volumeContext ? `6. 符合分卷的整体节奏和核心冲突` : ''}
+${plotLoopContext ? `7. 在细纲中自然地推进或回收上述伏笔追踪中的悬念` : ''}
+
+返回 JSON 字符串数组，每个元素是一个具体的情节步骤。
+    `.trim();
     
     // 🆕 检查 Token 预算
     const estimatedTokens = tokenCounter.estimateTokens(prompt) + 500; // 预估输出 500 tokens
@@ -773,7 +898,122 @@ export const generateChapterBeats = async (chapter: Chapter, ancestors: Chapter[
     return result;
 };
 
-export const streamChapterContent = async function* (chapter: Chapter, allChapters: Chapter[], config: NovelConfig, characters: Character[], settings: AppSettings, structure: WorldStructure) {
+/**
+ * Generates a comprehensive summary for a completed volume.
+ * 
+ * Requirements: 2.3, 2.4
+ * - Generates a 500-1000 word summary based on all chapter summaries in the volume
+ * - Captures key plot developments, character arcs, and major events
+ * - Returns the summary text to be saved to Volume.volumeSummary
+ * 
+ * @param volume - The volume to generate summary for
+ * @param chapters - All chapters in the project
+ * @param config - Novel configuration
+ * @param settings - App settings including API configuration
+ * @returns Summary text (500-1000 words)
+ */
+export const generateVolumeSummary = async (
+    volume: Volume,
+    chapters: Chapter[],
+    config: NovelConfig,
+    settings: AppSettings
+): Promise<string> => {
+    // Get chapters that belong to this volume, sorted by order
+    const volumeChapters = chapters
+        .filter(chapter => volume.chapterIds.includes(chapter.id))
+        .sort((a, b) => a.order - b.order);
+    
+    // If no chapters, return empty string
+    if (volumeChapters.length === 0) {
+        return '';
+    }
+    
+    // Build chapter summaries for the prompt
+    const chapterSummaries = volumeChapters
+        .map(c => `第${c.order}章 ${c.title}: ${c.summary}`)
+        .join('\n');
+    
+    const context = buildNovelContext(config);
+    
+    const prompt = `
+${context}
+
+=== 分卷信息 ===
+分卷标题: ${volume.title}
+分卷摘要: ${volume.summary}
+核心冲突: ${volume.coreConflict}
+章节数量: ${volumeChapters.length}
+
+=== 各章节摘要 ===
+${chapterSummaries}
+
+=== 任务 ===
+请基于以上章节摘要，为本卷生成一份详细的回顾总结。
+
+=== 要求 ===
+1. 总结字数控制在 500-1000 字
+2. 涵盖本卷的主要剧情发展脉络
+3. 突出重要的角色成长和关系变化
+4. 记录关键的转折点和高潮场景
+5. 总结本卷解决的冲突和留下的悬念
+6. 为下一卷的剧情发展做好铺垫和暗示
+7. 使用流畅的叙述性语言，而非简单罗列
+
+请直接输出总结内容，不要添加任何前缀或标题。
+    `.trim();
+    
+    // Check token budget
+    const estimatedTokens = tokenCounter.estimateTokens(prompt) + 1000; // Estimate 1000 tokens for output
+    const canProceed = await tokenCounter.checkBudget(estimatedTokens, settings.tokenBudget);
+    if (!canProceed) {
+        throw new Error('Token budget exceeded');
+    }
+    
+    let result = '';
+    
+    if (settings.provider === 'google') {
+        const ai = getGoogleAI(settings);
+        const res = await ai.models.generateContent({
+            model: settings.model,
+            contents: prompt
+        });
+        result = res.text || '';
+    } else {
+        const systemPrompt = '你是一个专业的小说编辑，擅长总结和提炼剧情要点。请生成流畅、有条理的分卷总结。';
+        result = await callOpenAI(
+            settings.baseUrl || '',
+            settings.apiKey,
+            settings.model,
+            [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: prompt }
+            ]
+        );
+    }
+    
+    // Record token usage
+    tokenCounter.record(prompt, result, settings.model, 'volume_summary');
+    
+    return result;
+};
+
+/**
+ * Streams chapter content generation with plot loop context injection.
+ * 
+ * Requirements: 4.1, 4.4
+ * - Includes relevant OPEN plot loops as context for narrative continuity
+ * - Injects all OPEN and URGENT plot loops into the AI prompt context
+ * 
+ * @param chapter - The chapter to generate content for
+ * @param allChapters - All chapters in the project
+ * @param config - Novel configuration
+ * @param characters - All characters in the project
+ * @param settings - App settings including API configuration
+ * @param structure - World structure
+ * @param volumes - All volumes in the project
+ * @param plotLoops - All plot loops in the project (optional, for plot loop context injection)
+ */
+export const streamChapterContent = async function* (chapter: Chapter, allChapters: Chapter[], config: NovelConfig, characters: Character[], settings: AppSettings, structure: WorldStructure, volumes: Volume[] = [], plotLoops: PlotLoop[] = []) {
     const context = buildNovelContext(config);
     
     // 🆕 使用 RAG 检索相关章节（如果启用）
@@ -823,61 +1063,65 @@ export const streamChapterContent = async function* (chapter: Chapter, allChapte
             console.warn('Character RAG retrieval failed:', e);
         }
     }
+
+    // 🆕 构建分卷上下文
+    let volumeContext = '';
+    if (chapter.volumeId && volumes.length > 0) {
+        const volume = volumes.find(v => v.id === chapter.volumeId);
+        if (volume) {
+            const volumeChapters = allChapters.filter(c => c.volumeId === volume.id);
+            const position = volumeChapters.filter(c => c.order <= chapter.order).length;
+            volumeContext = `
+当前分卷: ${volume.title}
+分卷核心冲突: ${volume.coreConflict}
+本卷进度: 第 ${position}/${volumeChapters.length} 章`;
+        }
+    }
+
+    // 🆕 获取上一章的伏笔
+    const previousChapter = findPreviousChapter(chapter, allChapters);
+    const hooksToResolve = previousChapter?.hooks || [];
+    
+    // 🆕 构建伏笔追踪上下文 (Requirements 4.1, 4.4)
+    const plotLoopContext = buildLoopContextForPrompt(chapter.id, plotLoops);
     
     const beats = (chapter.beats || []).join('\n- ');
     
     const prompt = `
-        撰写第 ${chapter.order} 章: ${chapter.title}。
-        ${context}
-        ${prevSummary ? `\n相关前情:\n${prevSummary}` : ''}
-        ${charContext ? `\n相关角色:\n${charContext}` : ''}
-        
-        本章摘要: ${chapter.summary}
-        本章细纲:
-        - ${beats}
-        
-        ## 写作要求：
-        
-        ### 内容风格：
-        - 网文风格，节奏紧凑，描写生动
-        - 对话自然流畅，符合角色性格
-        - 场景描写细腻，画面感强
-        - 情节推进合理，不拖沓
-        
-        ### 排版格式（重要）：
-        1. **段落分明**：每个自然段之间空一行
-        2. **对话独立**：每句对话单独成段
-        3. **场景转换**：场景切换时空两行
-        4. **段落长度**：每段 2-4 句话，避免大段文字
-        5. **标点规范**：使用中文标点，对话用双引号「」或""
-        
-        ### 段落示例：
-        
-        正确格式：
-        """
-        林风站在山巅，俯瞰着脚下的云海。晨光初现，金色的阳光穿透云层，在他身上镀上一层淡淡的光晕。
-        
-        "终于到了。"他轻声自语，眼中闪过一丝坚定。
-        
-        这一路走来，历经千辛万苦，如今终于站在了这传说中的天元峰顶。
-        
-        
-        山脚下，一道身影正急速攀登。
-        
-        "师兄，等等我！"少女的声音在山谷中回荡。
-        """
-        
-        错误格式（避免）：
-        """
-        林风站在山巅，俯瞰着脚下的云海。晨光初现，金色的阳光穿透云层，在他身上镀上一层淡淡的光晕。"终于到了。"他轻声自语，眼中闪过一丝坚定。这一路走来，历经千辛万苦，如今终于站在了这传说中的天元峰顶。山脚下，一道身影正急速攀登。"师兄，等等我！"少女的声音在山谷中回荡。
-        """
-        
-        ## 输出要求：
-        - 直接输出正文内容，不要任何前缀或说明
-        - 严格遵守上述排版格式
-        - 字数控制在 2000-3000 字
-        - 确保每个段落之间有明确的空行分隔
-    `;
+撰写第 ${chapter.order} 章: ${chapter.title}。
+
+${context}
+${volumeContext ? `\n=== 分卷背景 ===${volumeContext}\n` : ''}
+${prevSummary ? `\n=== 相关前情 ===\n${prevSummary}\n` : ''}
+${charContext ? `\n=== 相关角色 ===\n${charContext}\n` : ''}
+${hooksToResolve.length > 0 ? `\n=== 需要回应的伏笔 ===\n${hooksToResolve.map((h, i) => `${i + 1}. ${h}`).join('\n')}\n` : ''}
+${plotLoopContext ? `\n${plotLoopContext}\n` : ''}
+
+=== 本章任务 ===
+章节摘要: ${chapter.summary}
+${beats ? `细纲步骤:\n- ${beats}` : ''}
+
+=== 写作要求 ===
+1. 网文风格，节奏紧凑，描写生动
+2. 对话自然流畅，符合角色性格
+3. 场景描写细腻，画面感强
+4. 情节推进合理，不拖沓
+${hooksToResolve.length > 0 ? '5. 必须自然地回应上述伏笔，推进悬念的解决' : ''}
+${volumeContext ? '6. 符合当前分卷的核心冲突和整体节奏' : ''}
+${plotLoopContext ? '7. 在内容中自然地推进或回收伏笔追踪中的悬念' : ''}
+
+=== 排版格式 ===
+- 每个自然段之间空一行
+- 每句对话单独成段
+- 场景切换时空两行
+- 每段 2-4 句话，避免大段文字
+- 使用中文标点，对话用双引号
+
+=== 输出要求 ===
+- 直接输出正文内容，不要任何前缀或说明
+- 字数控制在 2000-3000 字
+- 确保段落之间有明确的空行分隔
+    `.trim();
 
     // 🆕 检查 Token 预算
     const estimatedTokens = tokenCounter.estimateTokens(prompt) + 3000; // 预估输出 3000 tokens

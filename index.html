@@ -107,6 +107,45 @@
         height: 0;
         pointer-events: none;
       }
+
+      /* Shimmer Animation for Progress Bars */
+      @keyframes shimmer {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(100%); }
+      }
+      .animate-shimmer {
+        animation: shimmer 2s infinite;
+      }
+
+      /* Slide-in Animation */
+      @keyframes slide-in-from-top {
+        0% { opacity: 0; transform: translateY(-8px); }
+        100% { opacity: 1; transform: translateY(0); }
+      }
+      .animate-in.slide-in-from-top-2 {
+        animation: slide-in-from-top 0.2s ease-out;
+      }
+
+      /* Fade-in Animation */
+      @keyframes fade-in {
+        0% { opacity: 0; }
+        100% { opacity: 1; }
+      }
+      .animate-fade-in {
+        animation: fade-in 0.3s ease-out;
+      }
+
+      /* Custom Scrollbar for Volume Lists */
+      .scrollbar-thin::-webkit-scrollbar {
+        width: 4px;
+      }
+      .scrollbar-thumb-ink-200::-webkit-scrollbar-thumb {
+        background: rgb(var(--color-ink-200));
+        border-radius: 2px;
+      }
+      .scrollbar-track-transparent::-webkit-scrollbar-track {
+        background: transparent;
+      }
     </style>
   <script type="importmap">
 {

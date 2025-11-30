@@ -1,8 +1,19 @@
 
 import React, { useState, useMemo } from 'react';
-import { Chapter, Character, NovelConfig, GenerationStatus, WorldStructure, AppSettings } from '../types';
-import { generateOutline, extendOutline } from '../services/geminiService';
-import { List, PlayCircle, Loader2, GripVertical, Plus, TrendingUp, Sparkles, Map, GitBranch, GitMerge, ChevronRight, ChevronDown } from 'lucide-react';
+import { Chapter, Character, NovelConfig, GenerationStatus, WorldStructure, AppSettings, Volume } from '../types';
+import { generateOutline, extendOutline, generateVolumeSummary } from '../services/geminiService';
+import { 
+  createVolume, 
+  deleteVolume, 
+  moveChapterToVolume, 
+  updateVolumeInArray,
+  validateVolumeData,
+  MAX_TITLE_LENGTH,
+  MAX_SUMMARY_LENGTH,
+  MAX_CONFLICT_LENGTH
+} from '../services/volumeService';
+import VolumeCard from './VolumeCard';
+import { List, Loader2, Plus, Sparkles, Map, GitBranch, ChevronRight, ChevronDown, BookOpen, X } from 'lucide-react';
 
 interface OutlineBuilderProps {
   chapters: Chapter[];
@@ -12,7 +23,166 @@ interface OutlineBuilderProps {
   structure?: WorldStructure;
   onSelectChapter: (id: string) => void;
   settings: AppSettings;
+  volumes: Volume[];
+  setVolumes: (volumes: Volume[]) => void;
 }
+
+// Volume Edit Dialog
+interface VolumeDialogProps {
+  volume?: Volume;
+  onSave: (data: { title: string; summary: string; coreConflict: string; expectedWordCount?: number }) => void;
+  onClose: () => void;
+}
+
+const VolumeDialog: React.FC<VolumeDialogProps> = ({ volume, onSave, onClose }) => {
+  const [title, setTitle] = useState(volume?.title || '');
+  const [summary, setSummary] = useState(volume?.summary || '');
+  const [coreConflict, setCoreConflict] = useState(volume?.coreConflict || '');
+  const [expectedWordCount, setExpectedWordCount] = useState(volume?.expectedWordCount?.toString() || '');
+  const [errors, setErrors] = useState<string[]>([]);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    // Validate before saving
+    const validation = validateVolumeData({
+      title,
+      summary,
+      coreConflict,
+      expectedWordCount: expectedWordCount ? parseInt(expectedWordCount) : undefined
+    });
+
+    if (!validation.isValid) {
+      setErrors(validation.errors);
+      return;
+    }
+
+    setErrors([]);
+    onSave({
+      title: title || '未命名分卷',
+      summary,
+      coreConflict,
+      expectedWordCount: expectedWordCount ? parseInt(expectedWordCount) : undefined
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+      <div 
+        className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 overflow-hidden"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between p-4 border-b border-ink-100">
+          <h3 className="font-bold text-lg text-ink-800">
+            {volume ? '编辑分卷' : '新建分卷'}
+          </h3>
+          <button onClick={onClose} className="p-1 hover:bg-ink-100 rounded">
+            <X size={18} />
+          </button>
+        </div>
+        
+        <form onSubmit={handleSubmit} className="p-4 space-y-4">
+          {/* Error Display */}
+          {errors.length > 0 && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+              <ul className="text-sm text-red-600 space-y-1">
+                {errors.map((error, i) => (
+                  <li key={i}>• {error}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div>
+            <div className="flex justify-between items-center mb-1">
+              <label className="block text-sm font-medium text-ink-700">分卷标题</label>
+              <span className={`text-xs ${title.length > MAX_TITLE_LENGTH ? 'text-red-500' : 'text-ink-400'}`}>
+                {title.length}/{MAX_TITLE_LENGTH}
+              </span>
+            </div>
+            <input
+              type="text"
+              value={title}
+              onChange={e => setTitle(e.target.value)}
+              placeholder="如：第一卷：崛起"
+              maxLength={MAX_TITLE_LENGTH + 10}
+              className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/50 ${
+                title.length > MAX_TITLE_LENGTH ? 'border-red-300' : 'border-ink-200'
+              }`}
+            />
+          </div>
+          
+          <div>
+            <div className="flex justify-between items-center mb-1">
+              <label className="block text-sm font-medium text-ink-700">分卷摘要</label>
+              <span className={`text-xs ${summary.length > MAX_SUMMARY_LENGTH ? 'text-red-500' : 'text-ink-400'}`}>
+                {summary.length}/{MAX_SUMMARY_LENGTH}
+              </span>
+            </div>
+            <textarea
+              value={summary}
+              onChange={e => setSummary(e.target.value)}
+              placeholder="简要描述本卷的主要内容（100-300字）"
+              rows={3}
+              maxLength={MAX_SUMMARY_LENGTH + 50}
+              className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none ${
+                summary.length > MAX_SUMMARY_LENGTH ? 'border-red-300' : 'border-ink-200'
+              }`}
+            />
+          </div>
+          
+          <div>
+            <div className="flex justify-between items-center mb-1">
+              <label className="block text-sm font-medium text-ink-700">核心冲突</label>
+              <span className={`text-xs ${coreConflict.length > MAX_CONFLICT_LENGTH ? 'text-red-500' : 'text-ink-400'}`}>
+                {coreConflict.length}/{MAX_CONFLICT_LENGTH}
+              </span>
+            </div>
+            <textarea
+              value={coreConflict}
+              onChange={e => setCoreConflict(e.target.value)}
+              placeholder="本卷的主要矛盾和冲突"
+              rows={2}
+              maxLength={MAX_CONFLICT_LENGTH + 50}
+              className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none ${
+                coreConflict.length > MAX_CONFLICT_LENGTH ? 'border-red-300' : 'border-ink-200'
+              }`}
+            />
+          </div>
+          
+          <div>
+            <label className="block text-sm font-medium text-ink-700 mb-1">预期字数（可选）</label>
+            <input
+              type="number"
+              value={expectedWordCount}
+              onChange={e => setExpectedWordCount(e.target.value)}
+              placeholder="如：200000"
+              min="0"
+              max="10000000"
+              className="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/50"
+            />
+          </div>
+          
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-ink-600 hover:bg-ink-100 rounded-lg transition"
+            >
+              取消
+            </button>
+            <button
+              type="submit"
+              className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary-hover transition"
+            >
+              {volume ? '保存' : '创建'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
 
 // Tree Node Component
 interface ChapterNodeProps {
@@ -126,10 +296,20 @@ const OutlineBuilder: React.FC<OutlineBuilderProps> = ({
     config, 
     structure,
     onSelectChapter,
-    settings 
+    settings,
+    volumes,
+    setVolumes
 }) => {
   const [status, setStatus] = useState<GenerationStatus>(GenerationStatus.IDLE);
   const [extendStatus, setExtendStatus] = useState<GenerationStatus>(GenerationStatus.IDLE);
+  
+  // Volume management state
+  const [expandedVolumeIds, setExpandedVolumeIds] = useState<Set<string>>(new Set());
+  const [showVolumeDialog, setShowVolumeDialog] = useState(false);
+  const [editingVolume, setEditingVolume] = useState<Volume | null>(null);
+  const [dragOverVolumeId, setDragOverVolumeId] = useState<string | null>(null);
+  const [generatingSummaryId, setGeneratingSummaryId] = useState<string | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
   const handleGenerate = async () => {
     if (!settings.apiKey) {
@@ -190,9 +370,133 @@ const OutlineBuilder: React.FC<OutlineBuilderProps> = ({
           summary: "在此处编写分支剧情...",
           content: "",
           wordCount: 0,
-          tension: 5
+          tension: 5,
+          volumeId: null,
+          hooks: []
       };
       setChapters([...chapters, newBranch]);
+  };
+
+  // === Volume Management Functions ===
+  
+  const handleCreateVolume = (data: { title: string; summary: string; coreConflict: string; expectedWordCount?: number }) => {
+    const newVolume = createVolume(data.title, data.summary, data.coreConflict, volumes, data.expectedWordCount);
+    setVolumes([...volumes, newVolume]);
+    setShowVolumeDialog(false);
+    // Auto-expand new volume
+    setExpandedVolumeIds(prev => new Set([...prev, newVolume.id]));
+  };
+
+  const handleEditVolume = (data: { title: string; summary: string; coreConflict: string; expectedWordCount?: number }) => {
+    if (!editingVolume) return;
+    const updatedVolumes = updateVolumeInArray(editingVolume.id, data, volumes);
+    setVolumes(updatedVolumes);
+    setEditingVolume(null);
+  };
+
+  const handleDeleteVolume = (volumeId: string) => {
+    const result = deleteVolume(volumeId, volumes, chapters);
+    setVolumes(result.volumes);
+    setChapters(result.chapters);
+    setDeleteConfirmId(null);
+  };
+
+  const handleGenerateVolumeSummary = async (volumeId: string) => {
+    const volume = volumes.find(v => v.id === volumeId);
+    if (!volume || !settings.apiKey) {
+      alert('请先配置 API Key');
+      return;
+    }
+    
+    setGeneratingSummaryId(volumeId);
+    try {
+      const summary = await generateVolumeSummary(volume, chapters, config, settings);
+      const updatedVolumes = updateVolumeInArray(volumeId, { volumeSummary: summary }, volumes);
+      setVolumes(updatedVolumes);
+    } catch (e) {
+      console.error('Failed to generate volume summary:', e);
+      alert('生成分卷总结失败，请重试');
+    } finally {
+      setGeneratingSummaryId(null);
+    }
+  };
+
+  const toggleVolumeExpand = (volumeId: string) => {
+    setExpandedVolumeIds(prev => {
+      const next = new Set(prev);
+      if (next.has(volumeId)) {
+        next.delete(volumeId);
+      } else {
+        next.add(volumeId);
+      }
+      return next;
+    });
+  };
+
+  // Drag and Drop handlers
+  const handleChapterDragStart = (e: React.DragEvent, chapterId: string) => {
+    e.dataTransfer.setData('chapterId', chapterId);
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleVolumeDragOver = (e: React.DragEvent, volumeId: string) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setDragOverVolumeId(volumeId);
+  };
+
+  const handleVolumeDragLeave = () => {
+    setDragOverVolumeId(null);
+  };
+
+  const handleVolumeDrop = (e: React.DragEvent, volumeId: string) => {
+    e.preventDefault();
+    const chapterId = e.dataTransfer.getData('chapterId');
+    if (chapterId) {
+      // Find the dropped chapter
+      const droppedChapter = chapters.find(c => c.id === chapterId);
+      if (!droppedChapter) {
+        setDragOverVolumeId(null);
+        return;
+      }
+
+      // Get all root chapters (main storyline) sorted by order
+      const mainlineChapters = chapters
+        .filter(c => !c.parentId)
+        .sort((a, b) => a.order - b.order);
+
+      // Find all chapters with order <= dropped chapter's order that are unassigned
+      const chaptersToMove = mainlineChapters.filter(c => 
+        c.order <= droppedChapter.order && !c.volumeId
+      );
+
+      // Move all these chapters to the volume
+      let currentVolumes = volumes;
+      let currentChapters = chapters;
+      
+      for (const chapter of chaptersToMove) {
+        const result = moveChapterToVolume(chapter.id, volumeId, currentVolumes, currentChapters);
+        currentVolumes = result.volumes;
+        currentChapters = result.chapters;
+      }
+
+      // Also move the dropped chapter if it was already in another volume
+      if (droppedChapter.volumeId && droppedChapter.volumeId !== volumeId) {
+        const result = moveChapterToVolume(chapterId, volumeId, currentVolumes, currentChapters);
+        currentVolumes = result.volumes;
+        currentChapters = result.chapters;
+      }
+
+      setVolumes(currentVolumes);
+      setChapters(currentChapters);
+    }
+    setDragOverVolumeId(null);
+  };
+
+  const handleRemoveFromVolume = (chapterId: string) => {
+    const result = moveChapterToVolume(chapterId, null, volumes, chapters);
+    setVolumes(result.volumes);
+    setChapters(result.chapters);
   };
 
   // Identify Roots (No parent, or parent not in list)
@@ -200,6 +504,16 @@ const OutlineBuilder: React.FC<OutlineBuilderProps> = ({
       // Sort by order
       return chapters.filter(c => !c.parentId).sort((a, b) => a.order - b.order);
   }, [chapters]);
+
+  // Chapters not assigned to any volume
+  const unassignedChapters = useMemo(() => {
+    return rootChapters.filter(c => !c.volumeId);
+  }, [rootChapters]);
+
+  // Sort volumes by order
+  const sortedVolumes = useMemo(() => {
+    return [...volumes].sort((a, b) => a.order - b.order);
+  }, [volumes]);
 
   return (
     <div className="h-full flex flex-col p-8 overflow-y-auto">
@@ -234,26 +548,121 @@ const OutlineBuilder: React.FC<OutlineBuilderProps> = ({
           </div>
       )}
 
-      {/* Tree Visualization */}
+      {/* Volume and Chapter Visualization */}
       <div className="max-w-4xl pb-10">
-        {rootChapters.length === 0 && (
+        {rootChapters.length === 0 && volumes.length === 0 && (
             <div className="text-center py-20 border-2 border-dashed border-ink-200 rounded-xl">
                 <p className="text-ink-400">暂无章节。点击上方按钮生成，或手动添加。</p>
             </div>
         )}
 
-        <div className="space-y-6">
+        {/* Volumes Section */}
+        {sortedVolumes.length > 0 && (
+          <div className="mb-8">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-ink-700 flex items-center gap-2">
+                <BookOpen size={18} />
+                分卷管理
+              </h3>
+              <button
+                onClick={() => setShowVolumeDialog(true)}
+                className="flex items-center gap-1 text-sm text-primary hover:text-primary-hover transition"
+              >
+                <Plus size={16} />
+                新建分卷
+              </button>
+            </div>
+            
+            <div className="space-y-4">
+              {sortedVolumes.map(volume => (
+                <div key={volume.id} className="group">
+                  <VolumeCard
+                    volume={volume}
+                    chapters={chapters}
+                    isExpanded={expandedVolumeIds.has(volume.id)}
+                    onToggle={() => toggleVolumeExpand(volume.id)}
+                    onEdit={() => setEditingVolume(volume)}
+                    onDelete={() => setDeleteConfirmId(volume.id)}
+                    onGenerateSummary={() => handleGenerateVolumeSummary(volume.id)}
+                    onSelectChapter={onSelectChapter}
+                    onDragOver={(e) => handleVolumeDragOver(e, volume.id)}
+                    onDrop={(e) => handleVolumeDrop(e, volume.id)}
+                    isDragOver={dragOverVolumeId === volume.id}
+                    onChapterDragStart={handleChapterDragStart}
+                    onRemoveChapter={handleRemoveFromVolume}
+                  />
+                  {generatingSummaryId === volume.id && (
+                    <div className="mt-2 flex items-center gap-2 text-sm text-primary">
+                      <Loader2 size={14} className="animate-spin" />
+                      正在生成分卷总结...
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Unassigned Chapters Section */}
+        {(unassignedChapters.length > 0 || volumes.length > 0) && (
+          <div className="mb-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-ink-700">
+                {volumes.length > 0 ? '未分配章节' : '章节列表'}
+              </h3>
+              {volumes.length === 0 && (
+                <button
+                  onClick={() => setShowVolumeDialog(true)}
+                  className="flex items-center gap-1 text-sm text-primary hover:text-primary-hover transition"
+                >
+                  <BookOpen size={16} />
+                  创建分卷
+                </button>
+              )}
+            </div>
+            
+            {unassignedChapters.length === 0 && volumes.length > 0 ? (
+              <div className="text-center py-8 border-2 border-dashed border-ink-200 rounded-xl">
+                <p className="text-ink-400 text-sm">所有章节已分配到分卷</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {unassignedChapters.map(chapter => (
+                  <div
+                    key={chapter.id}
+                    draggable
+                    onDragStart={(e) => handleChapterDragStart(e, chapter.id)}
+                    onDragEnd={handleVolumeDragLeave}
+                  >
+                    <ChapterNode 
+                      chapter={chapter}
+                      allChapters={chapters}
+                      depth={0}
+                      onSelect={onSelectChapter}
+                      onAddBranch={handleAddBranch}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Chapters without volume management (when no volumes exist) */}
+        {volumes.length === 0 && rootChapters.length > 0 && (
+          <div className="space-y-6">
             {rootChapters.map(root => (
-                <ChapterNode 
-                    key={root.id}
-                    chapter={root}
-                    allChapters={chapters}
-                    depth={0}
-                    onSelect={onSelectChapter}
-                    onAddBranch={handleAddBranch}
-                />
+              <ChapterNode 
+                key={root.id}
+                chapter={root}
+                allChapters={chapters}
+                depth={0}
+                onSelect={onSelectChapter}
+                onAddBranch={handleAddBranch}
+              />
             ))}
-        </div>
+          </div>
+        )}
         
         {chapters.length > 0 && (
              <div className="flex space-x-4 pt-8">
@@ -280,7 +689,9 @@ const OutlineBuilder: React.FC<OutlineBuilderProps> = ({
                              content: "",
                              wordCount: 0,
                              tension: 5,
-                             parentId: null
+                             parentId: null,
+                             volumeId: null,
+                             hooks: []
                          };
                          setChapters([...chapters, newChapter]);
                     }}
@@ -292,6 +703,47 @@ const OutlineBuilder: React.FC<OutlineBuilderProps> = ({
              </div>
         )}
       </div>
+
+      {/* Volume Dialog */}
+      {(showVolumeDialog || editingVolume) && (
+        <VolumeDialog
+          volume={editingVolume || undefined}
+          onSave={editingVolume ? handleEditVolume : handleCreateVolume}
+          onClose={() => {
+            setShowVolumeDialog(false);
+            setEditingVolume(null);
+          }}
+        />
+      )}
+
+      {/* Delete Confirmation Dialog */}
+      {deleteConfirmId && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setDeleteConfirmId(null)}>
+          <div 
+            className="bg-white rounded-xl shadow-xl p-6 max-w-sm mx-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <h3 className="font-bold text-lg text-ink-800 mb-2">确认删除分卷？</h3>
+            <p className="text-sm text-ink-600 mb-4">
+              删除分卷后，其中的章节将变为未分配状态，章节内容不会丢失。
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setDeleteConfirmId(null)}
+                className="px-4 py-2 text-ink-600 hover:bg-ink-100 rounded-lg transition"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => handleDeleteVolume(deleteConfirmId)}
+                className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

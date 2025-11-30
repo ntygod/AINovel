@@ -238,13 +238,18 @@ const testBeats = async () => {
         summary: '主角遇到了强大的敌人',
         order: 1,
         content: '',
-        wordCount: 0
+        wordCount: 0,
+        volumeId: null,
+        hooks: []
     };
+    const allChapters = []; // 所有章节，用于查找上一章和祖先
+    const volumes = [];     // 所有分卷，用于注入分卷上下文
     const config = {
         title: '测试小说',
         genre: '玄幻',
         // ... 其他配置
     };
+    const characters = [];  // 角色列表
     const settings = {
         provider: 'google',
         apiKey: 'YOUR_KEY',
@@ -252,7 +257,8 @@ const testBeats = async () => {
     };
     
     try {
-        const beats = await generateChapterBeats(chapter, [], config, [], settings);
+        // 新签名: generateChapterBeats(chapter, allChapters, volumes, config, characters, settings)
+        const beats = await generateChapterBeats(chapter, allChapters, volumes, config, characters, settings);
         console.log('生成的细纲:', beats);
     } catch (e) {
         console.error('错误:', e);

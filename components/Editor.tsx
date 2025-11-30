@@ -1,11 +1,14 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { Chapter, Character, NovelConfig, GenerationStatus, AppSettings, WorldStructure, WikiEntry, ChapterSnapshot } from '../types';
+import { Chapter, Character, NovelConfig, GenerationStatus, AppSettings, WorldStructure, WikiEntry, ChapterSnapshot, Volume, PlotLoop, PlotLoopStatus } from '../types';
 import { streamChapterContent, streamTextPolish, stripHtml, indexContent, generateChapterBeats, getChapterAncestors } from '../services/geminiService';
+import { findPreviousChapter, extractLastContent } from '../services/volumeService';
 import { indexChapterContent } from '../services/ragService';
 import { prepareContentForEditor, countWords } from '../services/textFormatter';
 import { db } from '../services/db';
 import RichEditor from './RichEditor';
-import { PenTool, RefreshCw, Loader2, ChevronLeft, ChevronRight, User, Info, Wand2, Scissors, Zap, Maximize2, X, Check, Copy, Sparkles, BookMarked, Minimize2, PanelRightClose, PanelRightOpen, Type, Target, History, RotateCcw, Clock, Brain, ListChecks, GitBranch, Plus } from 'lucide-react';
+import PlotLoopPanel from './PlotLoopPanel';
+import PlotLoopDetail from './PlotLoopDetail';
+import { PenTool, RefreshCw, Loader2, ChevronLeft, ChevronRight, User, Info, Wand2, Scissors, Zap, Maximize2, X, Check, Copy, Sparkles, BookMarked, Minimize2, PanelRightClose, PanelRightOpen, Type, Target, History, RotateCcw, Clock, Brain, ListChecks, GitBranch, Plus, ArrowLeft, Link2 } from 'lucide-react';
 
 interface EditorProps {
   chapter: Chapter | null;
@@ -16,6 +19,14 @@ interface EditorProps {
   onUpdateChapter: (updated: Chapter) => void;
   onChangeChapter: (direction: 'next' | 'prev') => void;
   settings: AppSettings;
+  volumes: Volume[]; // 分卷列表，用于深度上下文细纲生成
+  // PlotLoop integration
+  plotLoops: PlotLoop[];
+  onCreatePlotLoop: (loop: Partial<PlotLoop>) => void;
+  onUpdatePlotLoop: (id: string, updates: Partial<PlotLoop>) => void;
+  onDeletePlotLoop: (id: string) => void;
+  onMarkPlotLoopClosed?: (id: string, closeChapterId: string) => void;
+  onMarkPlotLoopAbandoned?: (id: string, reason: string) => void;
 }
 
 // Inline AI Menu Options
@@ -34,7 +45,14 @@ const Editor: React.FC<EditorProps> = ({
     structure,
     onUpdateChapter,
     onChangeChapter,
-    settings
+    settings,
+    volumes,
+    plotLoops,
+    onCreatePlotLoop,
+    onUpdatePlotLoop,
+    onDeletePlotLoop,
+    onMarkPlotLoopClosed,
+    onMarkPlotLoopAbandoned
 }) => {
   const [status, setStatus] = useState<GenerationStatus>(GenerationStatus.IDLE);
   const [beatsStatus, setBeatsStatus] = useState<GenerationStatus>(GenerationStatus.IDLE);
@@ -48,7 +66,11 @@ const Editor: React.FC<EditorProps> = ({
   // Editor View State
   const [isZenMode, setIsZenMode] = useState(false);
   const [showRightPanel, setShowRightPanel] = useState(true);
-  const [activeRightTab, setActiveRightTab] = useState<'plan' | 'context' | 'history'>('plan');
+  const [activeRightTab, setActiveRightTab] = useState<'plan' | 'context' | 'history' | 'plotloop'>('plan');
+
+  // PlotLoop State
+  const [selectedPlotLoop, setSelectedPlotLoop] = useState<PlotLoop | null>(null);
+  const [showPlotLoopDetail, setShowPlotLoopDetail] = useState(false);
 
   // History / Snapshots
   const [snapshots, setSnapshots] = useState<ChapterSnapshot[]>([]);
@@ -112,9 +134,16 @@ const Editor: React.FC<EditorProps> = ({
       
       setBeatsStatus(GenerationStatus.THINKING);
       try {
-          // Get ancestors for context
-          const ancestors = getChapterAncestors(chapter.id, allChapters);
-          const beats = await generateChapterBeats(chapter, ancestors, config, characters, settings);
+          // 使用增强的 generateChapterBeats，传入 allChapters 和 volumes
+          // 支持深度上下文：上一章结尾、钩子、祖先摘要、分卷上下文
+          const beats = await generateChapterBeats(
+              chapter, 
+              allChapters, 
+              volumes, 
+              config, 
+              characters, 
+              settings
+          );
           
           // 🆕 确保 beats 是数组
           const validBeats = Array.isArray(beats) ? beats : [];
@@ -155,6 +184,52 @@ const Editor: React.FC<EditorProps> = ({
       onUpdateChapter({ ...chapter, beats: newBeats });
   };
 
+  // --- PlotLoop Handlers ---
+  const handleSelectPlotLoop = (loop: PlotLoop) => {
+      setSelectedPlotLoop(loop);
+      setShowPlotLoopDetail(true);
+  };
+
+  const handleCreatePlotLoop = (loopData: Partial<PlotLoop>) => {
+      // If no title, open the detail modal for editing
+      if (!loopData.title) {
+          setSelectedPlotLoop(null);
+          setShowPlotLoopDetail(true);
+      }
+      onCreatePlotLoop({
+          ...loopData,
+          setupChapterId: loopData.setupChapterId || chapter?.id || ''
+      });
+  };
+
+  const handleSavePlotLoop = (loop: PlotLoop) => {
+      // Check if this is a new loop or an update
+      const existingLoop = plotLoops.find(l => l.id === loop.id);
+      if (existingLoop) {
+          onUpdatePlotLoop(loop.id, loop);
+      } else {
+          onCreatePlotLoop(loop);
+      }
+      setShowPlotLoopDetail(false);
+      setSelectedPlotLoop(null);
+  };
+
+  const handleClosePlotLoopDetail = () => {
+      setShowPlotLoopDetail(false);
+      setSelectedPlotLoop(null);
+  };
+
+  // --- Previous Chapter Context ---
+  const previousChapter = useMemo(() => {
+      if (!chapter) return null;
+      return findPreviousChapter(chapter, allChapters);
+  }, [chapter, allChapters]);
+
+  const previousChapterLastContent = useMemo(() => {
+      if (!previousChapter) return '';
+      return extractLastContent(previousChapter, 200);
+  }, [previousChapter]);
+
   const sessionDelta = chapter ? Math.max(0, chapter.wordCount - sessionStartCount) : 0;
   const dailyTarget = config.dailyTarget || 3000;
   const progressPercent = Math.min(100, (sessionDelta / dailyTarget) * 100);
@@ -176,9 +251,31 @@ const Editor: React.FC<EditorProps> = ({
   const handleSelectionChange = (sel: { start: number; end: number; text: string } | null, pos: {x: number, y: number} | null) => {
       if (sel) {
           setSelection(sel);
+          // Get selection position from browser for floating menu
+          const browserSelection = window.getSelection();
+          if (browserSelection && browserSelection.rangeCount > 0) {
+              const range = browserSelection.getRangeAt(0);
+              const rect = range.getBoundingClientRect();
+              setMenuPosition({ x: rect.left + rect.width / 2, y: rect.top });
+          }
       } else {
           setSelection(null);
+          setMenuPosition(null);
       }
+  };
+
+  // Handle creating plot loop from selected text
+  const handleCreateLoopFromSelection = (description: string, chapterId: string) => {
+      onCreatePlotLoop({
+          title: description.slice(0, 50) + (description.length > 50 ? '...' : ''),
+          description: description,
+          setupChapterId: chapterId,
+          importance: 3,
+          status: PlotLoopStatus.OPEN
+      });
+      // Clear selection after creating
+      setSelection(null);
+      setMenuPosition(null);
   };
 
   const handleAIAction = async (actionId: string) => {
@@ -264,8 +361,8 @@ const Editor: React.FC<EditorProps> = ({
     const startingContent = chapter.content || ""; 
 
     try {
-        // Pass all chapters so streamChapterContent can figure out ancestry for branches
-        const responseStream = await streamChapterContent(chapter, allChapters, config, characters, settings, structure);
+        // Pass all chapters and volumes so streamChapterContent can use deep context
+        const responseStream = await streamChapterContent(chapter, allChapters, config, characters, settings, structure, volumes);
         
         let fullText = "";
         let currentContent = startingContent;
@@ -415,23 +512,6 @@ const Editor: React.FC<EditorProps> = ({
                     className="min-h-[60vh]"
                 />
 
-                {/* Floating AI Helper Trigger */}
-                {selection && aiMenuMode === 'idle' && (
-                    <div className="fixed bottom-10 left-1/2 transform -translate-x-1/2 z-50 bg-white border border-ink-200 shadow-xl rounded-full p-2 flex gap-2 animate-in slide-in-from-bottom-5">
-                         {AI_ACTIONS.map(action => (
-                            <button
-                                key={action.id}
-                                onClick={() => handleAIAction(action.id)}
-                                className="p-2 hover:bg-ink-100 rounded-full text-ink-600 hover:text-primary transition-colors flex items-center gap-2 px-3"
-                                title={action.prompt}
-                            >
-                                <action.icon size={16} />
-                                <span className="text-xs font-bold">{action.label}</span>
-                            </button>
-                         ))}
-                    </div>
-                )}
-
                 {/* AI Result Modal */}
                 {aiMenuMode !== 'idle' && (
                      <div className="fixed inset-0 bg-black/20 flex items-center justify-center z-50">
@@ -481,7 +561,13 @@ const Editor: React.FC<EditorProps> = ({
                         onClick={() => setActiveRightTab('plan')}
                         className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider ${activeRightTab === 'plan' ? 'text-primary border-b-2 border-primary bg-white' : 'text-ink-400 hover:text-ink-600'}`}
                      >
-                         剧情细纲
+                         细纲
+                     </button>
+                     <button 
+                        onClick={() => setActiveRightTab('plotloop')}
+                        className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider ${activeRightTab === 'plotloop' ? 'text-primary border-b-2 border-primary bg-white' : 'text-ink-400 hover:text-ink-600'}`}
+                     >
+                         悬念
                      </button>
                      <button 
                         onClick={() => setActiveRightTab('context')}
@@ -497,11 +583,45 @@ const Editor: React.FC<EditorProps> = ({
                      </button>
                  </div>
 
-                 <div className="flex-1 overflow-y-auto p-4">
+                 <div className="flex-1 overflow-y-auto">
+                     
+                     {/* TAB: PLOT LOOPS (悬念) */}
+                     {activeRightTab === 'plotloop' && (
+                         <PlotLoopPanel
+                             plotLoops={plotLoops}
+                             currentChapterId={chapter?.id || null}
+                             chapters={allChapters}
+                             volumes={volumes}
+                             characters={characters}
+                             wikiEntries={structure.wikiEntries || []}
+                             onCreateLoop={handleCreatePlotLoop}
+                             onUpdateLoop={onUpdatePlotLoop}
+                             onDeleteLoop={onDeletePlotLoop}
+                             onSelectLoop={handleSelectPlotLoop}
+                         />
+                     )}
                      
                      {/* TAB: PLANNING (BEATS) */}
                      {activeRightTab === 'plan' && (
-                         <div className="space-y-4">
+                         <div className="space-y-4 p-4">
+                             {/* Previous Chapter Context */}
+                             {previousChapter && (
+                                 <div className="bg-amber-50 border border-amber-100 rounded-lg p-3 text-sm">
+                                     <h4 className="font-bold text-amber-800 mb-2 flex items-center gap-2">
+                                         <ArrowLeft size={14} /> 上一章: {previousChapter.title}
+                                     </h4>
+                                     {previousChapterLastContent && (
+                                         <div>
+                                             <p className="text-[10px] text-amber-600 uppercase tracking-wider mb-1">结尾内容</p>
+                                             <p className="text-xs text-ink-600 bg-white/50 p-2 rounded border border-amber-100 line-clamp-4">
+                                                 ...{previousChapterLastContent}
+                                             </p>
+                                         </div>
+                                     )}
+                                 </div>
+                             )}
+
+                             {/* Beats Section */}
                              <div className="bg-indigo-50 border border-indigo-100 rounded-lg p-3 text-sm">
                                 <h4 className="font-bold text-indigo-800 mb-1 flex items-center gap-2">
                                     <ListChecks size={16} /> 剧情节点 (Beats)
@@ -544,12 +664,13 @@ const Editor: React.FC<EditorProps> = ({
                                      <Plus size={12} /> 添加节点
                                  </button>
                              </div>
+
                          </div>
                      )}
 
                      {/* TAB: CONTEXT */}
                      {activeRightTab === 'context' && (
-                        <>
+                        <div className="p-4">
                             {settings.provider === 'google' && (
                                 <div className="mb-4">
                                     <button 
@@ -608,12 +729,12 @@ const Editor: React.FC<EditorProps> = ({
                                     </div>
                                 </div>
                             )}
-                        </>
+                        </div>
                      )}
 
                      {/* TAB: HISTORY */}
                      {activeRightTab === 'history' && (
-                        <div className="space-y-4">
+                        <div className="space-y-4 p-4">
                             <button 
                                 onClick={() => createSnapshot()}
                                 className="w-full py-2 bg-ink-100 hover:bg-ink-200 text-ink-700 rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition"
@@ -654,6 +775,59 @@ const Editor: React.FC<EditorProps> = ({
               </div>
           )}
       </div>
+
+      {/* Floating AI & PlotLoop Toolbar - positioned near selection, at root level to avoid overflow clipping */}
+      {selection && menuPosition && aiMenuMode === 'idle' && chapter && (
+          <div 
+              className="fixed z-[100] bg-white border border-ink-200 shadow-xl rounded-full p-2 flex gap-2 animate-in fade-in duration-200"
+              style={{
+                  left: Math.min(Math.max(menuPosition.x - 250, 10), window.innerWidth - 550),
+                  top: Math.max(menuPosition.y + 30, 10)
+              }}
+          >
+               {AI_ACTIONS.map(action => (
+                  <button
+                      key={action.id}
+                      onClick={() => handleAIAction(action.id)}
+                      className="p-2 hover:bg-ink-100 rounded-full text-ink-600 hover:text-primary transition-colors flex items-center gap-2 px-3"
+                      title={action.prompt}
+                  >
+                      <action.icon size={16} />
+                      <span className="text-xs font-bold">{action.label}</span>
+                  </button>
+               ))}
+               {/* Divider */}
+               <div className="w-px h-6 bg-ink-200 self-center mx-1" />
+               {/* Plot Loop Button */}
+               <button
+                  onClick={() => {
+                      handleCreateLoopFromSelection(selection.text, chapter.id);
+                  }}
+                  className="p-2 hover:bg-purple-50 rounded-full text-purple-600 hover:text-purple-700 transition-colors flex items-center gap-2 px-3"
+                  title="将选中文本设为伏笔"
+               >
+                  <Link2 size={16} />
+                  <span className="text-xs font-bold">设为伏笔</span>
+               </button>
+          </div>
+      )}
+
+      {/* PlotLoop Detail Modal */}
+      {showPlotLoopDetail && (
+          <PlotLoopDetail
+              loop={selectedPlotLoop}
+              chapters={allChapters}
+              volumes={volumes}
+              characters={characters}
+              wikiEntries={structure.wikiEntries || []}
+              allLoops={plotLoops}
+              onSave={handleSavePlotLoop}
+              onClose={handleClosePlotLoopDetail}
+              onDelete={onDeletePlotLoop}
+              onMarkClosed={onMarkPlotLoopClosed}
+              onMarkAbandoned={onMarkPlotLoopAbandoned}
+          />
+      )}
     </div>
   );
 };
