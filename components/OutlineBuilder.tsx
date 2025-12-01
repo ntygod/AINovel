@@ -191,10 +191,15 @@ interface ChapterNodeProps {
     depth: number;
     onSelect: (id: string) => void;
     onAddBranch: (parentId: string) => void;
+    onDelete?: (id: string) => void;
+    onUpdate?: (chapter: Chapter) => void;
 }
 
-const ChapterNode: React.FC<ChapterNodeProps> = ({ chapter, allChapters, depth, onSelect, onAddBranch }) => {
+const ChapterNode: React.FC<ChapterNodeProps> = ({ chapter, allChapters, depth, onSelect, onAddBranch, onDelete, onUpdate }) => {
     const [isExpanded, setIsExpanded] = useState(true);
+    const [isEditing, setIsEditing] = useState(false);
+    const [editTitle, setEditTitle] = useState(chapter.title);
+    const [editSummary, setEditSummary] = useState(chapter.summary);
     
     const children = allChapters
         .filter(c => c.parentId === chapter.id)
@@ -263,10 +268,76 @@ const ChapterNode: React.FC<ChapterNodeProps> = ({ chapter, allChapters, depth, 
                              >
                                  <GitBranch size={14} />
                              </button>
+                             {onDelete && (
+                               <button 
+                                  onClick={(e) => { 
+                                    e.stopPropagation(); 
+                                    if (window.confirm(`确定要删除章节"${chapter.title}"吗？`)) {
+                                      onDelete(chapter.id);
+                                    }
+                                  }}
+                                  className="opacity-0 group-hover:opacity-100 text-ink-400 hover:text-red-500 p-1 hover:bg-red-50 rounded"
+                                  title="删除章节"
+                               >
+                                   <X size={14} />
+                               </button>
+                             )}
                         </div>
                     </div>
                     
-                    <p className="text-xs text-ink-600 line-clamp-3 leading-relaxed">{chapter.summary}</p>
+                    {/* 摘要显示/编辑 */}
+                    {isEditing ? (
+                        <div className="space-y-2" onClick={e => e.stopPropagation()}>
+                            <input
+                                type="text"
+                                value={editTitle}
+                                onChange={e => setEditTitle(e.target.value)}
+                                placeholder="章节标题"
+                                className="w-full p-2 text-sm border border-ink-300 rounded focus:ring-2 focus:ring-primary focus:border-primary outline-none"
+                            />
+                            <textarea
+                                value={editSummary}
+                                onChange={e => setEditSummary(e.target.value)}
+                                placeholder="剧情摘要..."
+                                rows={3}
+                                className="w-full p-2 text-xs border border-ink-300 rounded focus:ring-2 focus:ring-primary focus:border-primary outline-none resize-none"
+                            />
+                            <div className="flex gap-2 justify-end">
+                                <button
+                                    onClick={() => {
+                                        setIsEditing(false);
+                                        setEditTitle(chapter.title);
+                                        setEditSummary(chapter.summary);
+                                    }}
+                                    className="px-3 py-1 text-xs text-ink-500 hover:bg-ink-100 rounded"
+                                >
+                                    取消
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        if (onUpdate) {
+                                            onUpdate({ ...chapter, title: editTitle, summary: editSummary });
+                                        }
+                                        setIsEditing(false);
+                                    }}
+                                    className="px-3 py-1 text-xs bg-primary text-white rounded hover:bg-primary-hover"
+                                >
+                                    保存
+                                </button>
+                            </div>
+                        </div>
+                    ) : (
+                        <p 
+                            className="text-xs text-ink-600 line-clamp-3 leading-relaxed cursor-pointer hover:bg-ink-50 p-1 -m-1 rounded"
+                            onClick={e => {
+                                e.stopPropagation();
+                                setIsEditing(true);
+                            }}
+                            title="点击编辑摘要"
+                        >
+                            {chapter.summary || <span className="text-ink-400 italic">点击添加剧情摘要...</span>}
+                        </p>
+                    )}
                 </div>
             </div>
 
@@ -281,6 +352,8 @@ const ChapterNode: React.FC<ChapterNodeProps> = ({ chapter, allChapters, depth, 
                             depth={depth + 1} 
                             onSelect={onSelect}
                             onAddBranch={onAddBranch}
+                            onDelete={onDelete}
+                            onUpdate={onUpdate}
                         />
                     ))}
                 </div>
@@ -320,9 +393,25 @@ const OutlineBuilder: React.FC<OutlineBuilderProps> = ({
         alert("请先创建角色。");
         return;
     }
+    
+    // 如果已有章节，确认是否要替换
+    if (chapters.length > 0) {
+      const confirmed = window.confirm("重新生成大纲将替换所有现有章节，确定要继续吗？");
+      if (!confirmed) return;
+    }
+    
     setStatus(GenerationStatus.THINKING);
     try {
       const newChapters = await generateOutline(config, characters, structure, settings);
+      
+      // 清空所有分卷的 chapterIds，因为旧章节已被替换
+      const clearedVolumes = volumes.map(v => ({
+        ...v,
+        chapterIds: []
+      }));
+      setVolumes(clearedVolumes);
+      
+      // 替换章节
       setChapters(newChapters);
       setStatus(GenerationStatus.COMPLETED);
     } catch (e) {
@@ -375,6 +464,31 @@ const OutlineBuilder: React.FC<OutlineBuilderProps> = ({
           hooks: []
       };
       setChapters([...chapters, newBranch]);
+  };
+
+  const handleDeleteChapter = (chapterId: string) => {
+      // 删除章节及其所有子章节
+      const getDescendantIds = (id: string): string[] => {
+          const children = chapters.filter(c => c.parentId === id);
+          return [id, ...children.flatMap(c => getDescendantIds(c.id))];
+      };
+      
+      const idsToDelete = new Set(getDescendantIds(chapterId));
+      const remainingChapters = chapters.filter(c => !idsToDelete.has(c.id));
+      
+      // 从分卷中移除被删除的章节
+      const updatedVolumes = volumes.map(v => ({
+          ...v,
+          chapterIds: v.chapterIds?.filter(id => !idsToDelete.has(id)) || []
+      }));
+      
+      setVolumes(updatedVolumes);
+      setChapters(remainingChapters);
+  };
+
+  // 更新章节（标题、摘要等）
+  const handleUpdateChapter = (updatedChapter: Chapter) => {
+      setChapters(chapters.map(c => c.id === updatedChapter.id ? updatedChapter : c));
   };
 
   // === Volume Management Functions ===
@@ -640,6 +754,8 @@ const OutlineBuilder: React.FC<OutlineBuilderProps> = ({
                       depth={0}
                       onSelect={onSelectChapter}
                       onAddBranch={handleAddBranch}
+                      onDelete={handleDeleteChapter}
+                      onUpdate={handleUpdateChapter}
                     />
                   </div>
                 ))}
@@ -659,6 +775,8 @@ const OutlineBuilder: React.FC<OutlineBuilderProps> = ({
                 depth={0}
                 onSelect={onSelectChapter}
                 onAddBranch={handleAddBranch}
+                onDelete={handleDeleteChapter}
+                onUpdate={handleUpdateChapter}
               />
             ))}
           </div>

@@ -65,33 +65,127 @@ export interface TokenBudget {
   enabled: boolean;
 }
 
+/**
+ * 单个场景的完整模型配置
+ * 支持跨服务商配置
+ */
+export interface SceneModelConfig {
+  provider: AIProvider;
+  apiKey: string;
+  baseUrl?: string;
+  model: string;
+}
+
+/**
+ * 解析后的完整模型配置
+ * 所有字段必填，用于 API 调用
+ */
+export interface ResolvedModelConfig {
+  provider: AIProvider;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+}
+
+/**
+ * AI 场景类型 - 文本场景
+ */
+export type AISceneType = 'creative' | 'structure' | 'writing' | 'analysis';
+
+/**
+ * AI 多模态场景类型 - 视频/语音
+ */
+export type AIMultimodalSceneType = 'video' | 'speech';
+
+/**
+ * 所有 AI 场景类型
+ */
+export type AIAllSceneType = AISceneType | AIMultimodalSceneType;
+
+/**
+ * 场景化模型配置
+ * 允许为不同 AI 任务指定不同的模型和服务商
+ */
+export interface SceneModels {
+  /** 创意生成 - 项目创意、角色名等 (轻量级) */
+  creative?: string | SceneModelConfig;
+  /** 结构化生成 - 世界观、角色、细纲等 (中等) */
+  structure?: string | SceneModelConfig;
+  /** 长文写作 - 章节内容、润色等 (重量级) */
+  writing?: string | SceneModelConfig;
+  /** 分析任务 - 章节分析、Wiki提取等 (中等) */
+  analysis?: string | SceneModelConfig;
+  /** 视频生成 - AI 视频工作室 (多模态) */
+  video?: string | SceneModelConfig;
+  /** 语音生成 - TTS 朗读 (多模态) */
+  speech?: string | SceneModelConfig;
+}
+
 export interface AppSettings {
   provider: AIProvider;
   apiKey: string;
   baseUrl?: string; // Optional, for custom/deepseek/openai or Google Proxy
-  model: string;
+  model: string; // 默认模型，当场景模型未配置时使用
   videoModel?: string; // e.g. veo-3.1-fast-generate-preview
   speechModel?: string; // e.g. gemini-2.5-flash-preview-tts
   theme: 'light' | 'dark' | 'sepia' | 'midnight';
   tokenBudget?: TokenBudget; // Token 预算控制
   useRAG?: boolean; // 是否启用 RAG 检索增强
+  sceneModels?: SceneModels; // 场景化模型配置
 }
+
+// 角色性别类型
+export type CharacterGender = 'male' | 'female' | 'other' | 'unknown';
 
 export interface CharacterRelationship {
   targetId: string;
   targetName: string; // Helper for display if ID lookup fails or for AI generation context
   relation: string;   // e.g., "Father", "Rival", "Secret Crush"
+  attitude?: string;  // [新增] 对该角色的态度
 }
 
 export interface Character {
+  // === 基础信息 ===
   id: string;
   name: string;
   role: string;
+  gender?: CharacterGender;    // [新增] 性别
+  age?: string;                // [新增] 年龄段
+  
+  // === 核心设定 (静态) ===
   description: string; // Short bio / summary
   appearance: string;  // Detailed visual description
   background: string;  // Backstory
   personality: string; // Detailed personality traits
+  
+  // === AI 写作指导 (核心优化字段) ===
+  speakingStyle?: string;       // [新增] 对话风格
+  motivation?: string;          // [新增] 核心驱动力
+  fears?: string;               // [新增] 弱点/恐惧
+  narrativeFunction?: string;   // [新增] 叙事功能
+  
+  // === 关系网 ===
   relationships: CharacterRelationship[];
+  
+  // === 动态状态 ===
+  status?: string;             // [新增] e.g., "健康", "重伤"
+  tags?: string[];             // [新增] e.g., ["剑修", "傲娇"]
+  isActive?: boolean;          // [新增] 是否活跃
+  
+  // === 追踪字段 ===
+  introducedInVolumeId?: string;   // [新增] 首次登场分卷
+  introducedInChapterId?: string;  // [新增] 首次登场章节
+}
+
+// 角色原型接口
+export interface CharacterArchetype {
+  id: string;
+  name: string;                    // e.g., "垫脚石"
+  description: string;             // 原型描述
+  defaultMotivation: string;       // 默认动机
+  defaultNarrativeFunction: string;// 默认叙事功能
+  suggestedSpeakingStyles: string[];// 建议的对话风格
+  icon: string;                    // 图标标识
 }
 
 export interface Faction {
@@ -132,6 +226,9 @@ export interface WorldStructure {
   wikiEntries?: WikiEntry[]; // New: Encyclopedia Database
 }
 
+// 章节类型枚举
+export type ChapterType = 'normal' | 'flashback' | 'prologue' | 'epilogue' | 'interlude';
+
 export interface Chapter {
   id: string;
   order: number;
@@ -144,6 +241,8 @@ export interface Chapter {
   parentId?: string | null; // New: For branching narratives
   volumeId?: string | null; // 所属分卷 ID
   hooks?: string[]; // 本章留下的钩子/伏笔
+  chapterType?: ChapterType; // 章节类型：普通/回忆/序章/尾声/间章
+  flashbackTimeHint?: string; // 回忆章节的时间提示，如"十年前"、"主角幼年时期"
 }
 
 // 分卷接口 - 位于书和章节之间的结构层级

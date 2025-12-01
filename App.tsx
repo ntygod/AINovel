@@ -24,9 +24,22 @@ import {
   checkAndUpdateAllUrgentStatus,
   CreatePlotLoopInput
 } from './services/plotLoopService';
+import { migrateCharacter } from './services/characterService';
 import { Loader2, Cloud } from 'lucide-react';
 
 const DEFAULT_API_KEY = process.env.API_KEY || '';
+
+/**
+ * Migrates all characters in a NovelState to ensure new fields have default values
+ * Requirements: 1.5, 6.4
+ */
+const migrateProjectCharacters = (state: NovelState): NovelState => {
+  const migratedCharacters = state.characters.map(char => migrateCharacter(char));
+  return {
+    ...state,
+    characters: migratedCharacters,
+  };
+};
 
 // Keep-Alive View Wrapper moved outside component to avoid recreation and fix type inference
 interface KeepAliveViewProps {
@@ -61,9 +74,30 @@ const App: React.FC = () => {
                   enabled: false // 默认不启用
               };
           }
-          // 🆕 添加默认的 RAG 配置
+          // 🆕 添加默认的 RAG 配置 - 默认启用以支持动态演进系统
           if (parsed.useRAG === undefined) {
-              parsed.useRAG = false; // 默认不启用 RAG
+              parsed.useRAG = true; // 默认启用 RAG
+          }
+          // 🆕 Migration: Ensure sceneModels is properly initialized
+          // SceneModels can contain either string (model name only) or full SceneModelConfig objects
+          // Both formats are valid and handled by resolveSceneConfig in geminiService.ts
+          if (parsed.sceneModels) {
+              // Validate each scene config - remove invalid entries
+              const validScenes = ['creative', 'structure', 'writing', 'analysis'];
+              for (const scene of validScenes) {
+                  const config = parsed.sceneModels[scene];
+                  if (config !== undefined && config !== null) {
+                      // If it's an object, ensure it has required fields
+                      if (typeof config === 'object') {
+                          // Validate SceneModelConfig has required fields
+                          if (!config.provider || !config.model) {
+                              // Invalid config, remove it to fall back to default
+                              delete parsed.sceneModels[scene];
+                          }
+                      }
+                      // String configs are always valid (just model name)
+                  }
+              }
           }
           return parsed;
       }
@@ -78,7 +112,7 @@ const App: React.FC = () => {
               warningThreshold: 0.8,
               enabled: false
           },
-          useRAG: false
+          useRAG: true // 默认启用 RAG
       };
   });
 
@@ -158,12 +192,15 @@ const App: React.FC = () => {
   const handleSelectProject = async (id: string) => {
       const project = await db.loadProject(id); // Loads Lean State (no content)
       if (project) {
-          setNovelState(project);
-          if (project.config.title === "未命名项目") {
+          // Migrate legacy character data to ensure new fields have default values
+          // Requirements: 1.5, 6.4
+          const migratedProject = migrateProjectCharacters(project);
+          setNovelState(migratedProject);
+          if (migratedProject.config.title === "未命名项目") {
               setViewMode(ViewMode.SETUP);
-          } else if (project.chapters.length > 0 && project.currentChapterId) {
+          } else if (migratedProject.chapters.length > 0 && migratedProject.currentChapterId) {
              // If resuming a project with a selected chapter, we should load it
-             await loadAndSetActiveChapter(project.currentChapterId, project);
+             await loadAndSetActiveChapter(migratedProject.currentChapterId, migratedProject);
           } else {
               setViewMode(ViewMode.STRUCTURE);
           }
@@ -238,6 +275,28 @@ const App: React.FC = () => {
   const updatePlotLoops = (plotLoops: PlotLoop[]) => updateWrapper(prev => ({ ...prev, plotLoops }));
 
   // --- PlotLoop CRUD Operations ---
+  
+  // 辅助函数：更新伏笔后自动检查 URGENT 状态
+  const updatePlotLoopsWithUrgentCheck = (loops: PlotLoop[]) => {
+      if (!novelState) return;
+      
+      // 获取当前章节
+      const currentChapter = novelState.chapters.find(c => c.id === novelState.currentChapterId);
+      
+      // 如果有当前章节，检查并更新 URGENT 状态
+      if (currentChapter) {
+          const checkedLoops = checkAndUpdateAllUrgentStatus(
+              loops,
+              currentChapter,
+              novelState.chapters,
+              novelState.volumes
+          );
+          updatePlotLoops(checkedLoops);
+      } else {
+          updatePlotLoops(loops);
+      }
+  };
+  
   const handleCreatePlotLoop = (loopData: Partial<PlotLoop>) => {
       if (!novelState) return;
       
@@ -255,13 +314,15 @@ const App: React.FC = () => {
       };
       
       const newLoop = createPlotLoop(input);
-      updatePlotLoops([...novelState.plotLoops, newLoop]);
+      // 创建后自动检查 URGENT 状态
+      updatePlotLoopsWithUrgentCheck([...novelState.plotLoops, newLoop]);
   };
 
   const handleUpdatePlotLoop = (id: string, updates: Partial<PlotLoop>) => {
       if (!novelState) return;
       const updatedLoops = updatePlotLoopInArray(id, updates, novelState.plotLoops);
-      updatePlotLoops(updatedLoops);
+      // 更新后自动检查 URGENT 状态
+      updatePlotLoopsWithUrgentCheck(updatedLoops);
   };
 
   const handleDeletePlotLoop = (id: string) => {
@@ -382,6 +443,8 @@ const App: React.FC = () => {
                 config={novelState.config} 
                 settings={appSettings}
                 structure={novelState.structure}
+                volumes={novelState.volumes}
+                chapters={novelState.chapters}
             />
         </KeepAliveView>
         
@@ -410,7 +473,10 @@ const App: React.FC = () => {
         </KeepAliveView>
         
         <KeepAliveView mode={ViewMode.TIMELINE} activeMode={viewMode}>
-            <TimelineView novelState={novelState} />
+            <TimelineView 
+                novelState={novelState}
+                onSelectChapter={handleSelectChapter}
+            />
         </KeepAliveView>
         
         <KeepAliveView mode={ViewMode.WRITE} activeMode={viewMode}>
@@ -435,6 +501,7 @@ const App: React.FC = () => {
                     onDeletePlotLoop={handleDeletePlotLoop}
                     onMarkPlotLoopClosed={handleMarkPlotLoopClosed}
                     onMarkPlotLoopAbandoned={handleMarkPlotLoopAbandoned}
+                    onAddCharacter={(char) => updateCharacters([...novelState.characters, char])}
                 />
             )}
         </KeepAliveView>

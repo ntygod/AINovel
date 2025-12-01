@@ -1,8 +1,11 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Character, NovelConfig, WorldStructure, GenerationStatus, AppSettings } from '../types';
-import { generateCharacters, generateRandomNames } from '../services/geminiService';
-import { Users, Sparkles, Loader2, Plus, Trash2, Edit2, X, Save, Network, LayoutGrid, Info, Dices, User } from 'lucide-react';
+import { Character, CharacterGender, CharacterArchetype, NovelConfig, WorldStructure, GenerationStatus, AppSettings, Volume, Chapter } from '../types';
+import { generateCharacters, generateRandomNames, generateCharactersWithContext, analyzeCharacterInChapters, CharacterGenerationContext } from '../services/geminiService';
+import { getArchetypes, getArchetypeById } from '../services/archetypeService';
+import { validateCharacter, applyStatusSuggestion, StatusSyncSuggestion } from '../services/characterService';
+import { autoIndexOnSave } from '../services/ragService';
+import { Users, Sparkles, Loader2, Plus, Trash2, Edit2, X, Save, Network, LayoutGrid, Info, Dices, User, RefreshCw, Tag, AlertCircle, Check, ChevronDown } from 'lucide-react';
 
 interface CharacterForgeProps {
   characters: Character[];
@@ -10,17 +13,57 @@ interface CharacterForgeProps {
   config: NovelConfig;
   settings: AppSettings;
   structure: WorldStructure;
+  volumes?: Volume[];
+  chapters?: Chapter[];
 }
 
-const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacters, config, settings, structure }) => {
+// Common speaking style options
+const SPEAKING_STYLE_OPTIONS = [
+  '傲慢', '温柔', '冷漠', '幽默', '毒舌', '神秘', '热情', '沉稳',
+  '傲娇', '腹黑', '天真', '老成', '粗犷', '文雅', '狡猾', '憨厚'
+];
+
+const CharacterForge: React.FC<CharacterForgeProps> = ({ 
+  characters, 
+  setCharacters, 
+  config, 
+  settings, 
+  structure,
+  volumes = [],
+  chapters = []
+}) => {
   const [status, setStatus] = useState<GenerationStatus>(GenerationStatus.IDLE);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'graph'>('grid');
   const [nameGenStatus, setNameGenStatus] = useState(false);
   const [generateCount, setGenerateCount] = useState<number>(5);
   
+  // Context selection for AI generation
+  const [selectedVolumeId, setSelectedVolumeId] = useState<string>('');
+  const [selectedChapterId, setSelectedChapterId] = useState<string>('');
+  const [selectedArchetypeId, setSelectedArchetypeId] = useState<string>('');
+  
+  // Status sync state
+  const [syncingCharacterId, setSyncingCharacterId] = useState<string | null>(null);
+  const [syncSuggestion, setSyncSuggestion] = useState<StatusSyncSuggestion | null>(null);
+  
   // Local state for editing a character
   const [editForm, setEditForm] = useState<Partial<Character>>({});
+  const [validationErrors, setValidationErrors] = useState<string[]>([]);
+  
+  // Tag input state
+  const [tagInput, setTagInput] = useState('');
+
+  // Get filtered chapters based on selected volume
+  const filteredChapters = useMemo(() => {
+    if (!selectedVolumeId) return chapters;
+    const volume = volumes.find(v => v.id === selectedVolumeId);
+    if (!volume || !volume.chapterIds) return chapters;
+    return chapters.filter(c => volume.chapterIds.includes(c.id));
+  }, [selectedVolumeId, volumes, chapters]);
+
+  // Get archetypes
+  const archetypes = useMemo(() => getArchetypes(), []);
 
   const handleGenerate = async () => {
     if (!settings.apiKey) {
@@ -40,7 +83,27 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
 
     setStatus(GenerationStatus.THINKING);
     try {
-      const newChars = await generateCharacters(config, settings, characters, structure, generateCount);
+      // Build context for generation
+      const context: CharacterGenerationContext = {};
+      
+      if (selectedVolumeId) {
+        context.volume = volumes.find(v => v.id === selectedVolumeId);
+      }
+      if (selectedChapterId) {
+        context.chapter = chapters.find(c => c.id === selectedChapterId);
+      }
+      if (selectedArchetypeId) {
+        context.archetype = getArchetypeById(selectedArchetypeId);
+      }
+      
+      // Use context-aware generation if context is provided
+      let newChars: Character[];
+      if (context.volume || context.chapter || context.archetype) {
+        newChars = await generateCharactersWithContext(config, settings, characters, structure, context, generateCount);
+      } else {
+        newChars = await generateCharacters(config, settings, characters, structure, generateCount);
+      }
+      
       setCharacters([...characters, ...newChars]);
       setStatus(GenerationStatus.COMPLETED);
     } catch (e) {
@@ -74,6 +137,8 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
   const startEdit = (char: Character) => {
       setEditingId(char.id);
       setEditForm(JSON.parse(JSON.stringify(char))); // Deep copy
+      setValidationErrors([]);
+      setTagInput('');
   };
 
   const startNew = () => {
@@ -86,10 +151,22 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
           appearance: "",
           background: "",
           personality: "",
-          relationships: []
+          relationships: [],
+          // New fields with defaults
+          gender: 'unknown',
+          age: '',
+          speakingStyle: '',
+          motivation: '',
+          fears: '',
+          narrativeFunction: '',
+          status: '正常',
+          tags: [],
+          isActive: true,
       };
       setEditingId(newId);
       setEditForm(newChar);
+      setValidationErrors([]);
+      setTagInput('');
   };
 
   const saveEdit = () => {
@@ -97,19 +174,80 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
       
       const newChar = editForm as Character;
       
+      // Validate character
+      const validation = validateCharacter(newChar);
+      if (!validation.isValid) {
+          setValidationErrors(validation.errors);
+          return;
+      }
+      
       if (characters.find(c => c.id === newChar.id)) {
           setCharacters(characters.map(c => c.id === newChar.id ? newChar : c));
       } else {
           setCharacters([...characters, newChar]);
       }
+      
+      // Auto-index character for RAG
+      autoIndexOnSave('character', newChar, settings);
+      
       setEditingId(null);
       setEditForm({});
+      setValidationErrors([]);
   };
 
   const cancelEdit = () => {
       setEditingId(null);
       setEditForm({});
+      setValidationErrors([]);
+      setSyncSuggestion(null);
   };
+
+  // Handle tag addition
+  const addTag = () => {
+    if (!tagInput.trim()) return;
+    const currentTags = editForm.tags || [];
+    if (!currentTags.includes(tagInput.trim())) {
+      setEditForm({ ...editForm, tags: [...currentTags, tagInput.trim()] });
+    }
+    setTagInput('');
+  };
+
+  // Handle tag removal
+  const removeTag = (tagToRemove: string) => {
+    const currentTags = editForm.tags || [];
+    setEditForm({ ...editForm, tags: currentTags.filter(t => t !== tagToRemove) });
+  };
+
+  // Handle status sync
+  const handleSyncStatus = async (char: Character) => {
+    if (!settings.apiKey) {
+      alert("请先配置 API Key");
+      return;
+    }
+    
+    setSyncingCharacterId(char.id);
+    setSyncSuggestion(null);
+    
+    try {
+      const suggestion = await analyzeCharacterInChapters(char, chapters, settings);
+      setSyncSuggestion(suggestion);
+    } catch (e) {
+      console.error('Status sync failed:', e);
+      alert('状态同步失败，请重试');
+    } finally {
+      setSyncingCharacterId(null);
+    }
+  };
+
+  // Apply sync suggestion
+  const applySyncSuggestion = () => {
+    if (!syncSuggestion || !editForm.id) return;
+    
+    const updated = applyStatusSuggestion(editForm as Character, syncSuggestion);
+    setEditForm(updated);
+    setSyncSuggestion(null);
+  };
+
 
   // Interactive Relationship Graph Component
   const InteractiveGraph = () => {
@@ -141,10 +279,10 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
               });
               setNodePositions(newPos);
           }
-      }, [characters]); // Only runs if characters change significantly or on mount
+      }, [characters]);
 
       const handleWheel = (e: React.WheelEvent) => {
-          e.preventDefault(); // Prevent page scroll (might require ref listener for passive: false)
+          e.preventDefault();
           const scale = e.deltaY > 0 ? 1.1 : 0.9;
           setViewBox(prev => ({
               x: prev.x + (prev.w - prev.w * scale) / 2,
@@ -171,14 +309,12 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
               setViewBox(prev => ({ ...prev, x: prev.x - dx, y: prev.y - dy }));
               setDragStart({ x: e.clientX, y: e.clientY });
           } else if (dragNode) {
-              // Convert screen dxy to svg dxy
               const svg = svgRef.current;
               if (!svg) return;
               
               const pt = svg.createSVGPoint();
               pt.x = e.clientX;
               pt.y = e.clientY;
-              // Transform to SVG coordinates
               const svgP = pt.matrixTransform(svg.getScreenCTM()?.inverse());
               
               setNodePositions(prev => ({
@@ -265,7 +401,7 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
                             onDoubleClick={() => startEdit(char)}
                             className="cursor-pointer hover:opacity-80 transition-opacity"
                         >
-                            <circle r="24" className="fill-white stroke-primary" strokeWidth="2" />
+                            <circle r="24" className={`fill-white stroke-primary ${char.isActive === false ? 'opacity-50' : ''}`} strokeWidth="2" />
                             <text dy="5" textAnchor="middle" className="fill-primary font-bold text-xs pointer-events-none">
                                 {char.name.slice(0, 1)}
                             </text>
@@ -286,7 +422,6 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
                 <p>🖱️ <b>双击节点</b>: 编辑详情</p>
             </div>
             
-            {/* Reset View Button */}
             <button 
                 onClick={() => setViewBox({ x: 0, y: 0, w: 800, h: 600 })}
                 className="absolute bottom-4 right-4 bg-white p-2 rounded shadow border border-ink-200 text-ink-500 hover:text-primary"
@@ -297,6 +432,41 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
         </div>
       );
   };
+
+  // Archetype Selection Component
+  const ArchetypeSelector = () => (
+    <div className="mb-4">
+      <label className="block text-xs font-bold text-ink-500 uppercase mb-2">选择角色原型</label>
+      <div className="grid grid-cols-4 gap-2">
+        <button
+          onClick={() => setSelectedArchetypeId('')}
+          className={`p-2 rounded-lg border text-xs transition ${
+            !selectedArchetypeId 
+              ? 'border-primary bg-primary-light text-primary' 
+              : 'border-ink-200 hover:border-ink-300'
+          }`}
+        >
+          无原型
+        </button>
+        {archetypes.map(arch => (
+          <button
+            key={arch.id}
+            onClick={() => setSelectedArchetypeId(arch.id)}
+            className={`p-2 rounded-lg border text-xs transition flex items-center gap-1 ${
+              selectedArchetypeId === arch.id 
+                ? 'border-primary bg-primary-light text-primary' 
+                : 'border-ink-200 hover:border-ink-300'
+            }`}
+            title={arch.description}
+          >
+            <span>{arch.icon}</span>
+            <span>{arch.name}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
 
   return (
     <div className="h-full flex flex-col p-8 overflow-y-auto relative">
@@ -355,6 +525,74 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
         </div>
       </div>
       
+      {/* Context Selection for AI Generation */}
+      <div className="bg-white p-4 rounded-xl border border-ink-200 mb-6 shadow-sm">
+        <h3 className="text-sm font-bold text-ink-700 mb-3 flex items-center gap-2">
+          <Sparkles size={16} className="text-primary" />
+          AI 生成上下文设置
+        </h3>
+        <div className="grid grid-cols-3 gap-4 mb-4">
+          {/* Volume Selector */}
+          <div>
+            <label className="block text-xs font-bold text-ink-500 uppercase mb-1">目标分卷</label>
+            <select
+              value={selectedVolumeId}
+              onChange={(e) => {
+                setSelectedVolumeId(e.target.value);
+                setSelectedChapterId('');
+              }}
+              className="w-full p-2 border border-ink-300 rounded-lg text-sm"
+            >
+              <option value="">不指定分卷</option>
+              {volumes.map(v => (
+                <option key={v.id} value={v.id}>{v.title}</option>
+              ))}
+            </select>
+          </div>
+          
+          {/* Chapter Selector */}
+          <div>
+            <label className="block text-xs font-bold text-ink-500 uppercase mb-1">目标章节</label>
+            <select
+              value={selectedChapterId}
+              onChange={(e) => setSelectedChapterId(e.target.value)}
+              className="w-full p-2 border border-ink-300 rounded-lg text-sm"
+              disabled={filteredChapters.length === 0}
+            >
+              <option value="">不指定章节</option>
+              {filteredChapters.map(c => (
+                <option key={c.id} value={c.id}>{c.title}</option>
+              ))}
+            </select>
+          </div>
+          
+          {/* Archetype Selector */}
+          <div>
+            <label className="block text-xs font-bold text-ink-500 uppercase mb-1">角色原型</label>
+            <select
+              value={selectedArchetypeId}
+              onChange={(e) => setSelectedArchetypeId(e.target.value)}
+              className="w-full p-2 border border-ink-300 rounded-lg text-sm"
+            >
+              <option value="">不使用原型</option>
+              {archetypes.map(a => (
+                <option key={a.id} value={a.id}>{a.icon} {a.name}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        
+        {/* Selected context preview */}
+        {(selectedVolumeId || selectedChapterId || selectedArchetypeId) && (
+          <div className="text-xs text-ink-500 bg-ink-50 p-2 rounded">
+            <span className="font-bold">当前上下文: </span>
+            {selectedVolumeId && <span className="mr-2">📚 {volumes.find(v => v.id === selectedVolumeId)?.title}</span>}
+            {selectedChapterId && <span className="mr-2">📖 {chapters.find(c => c.id === selectedChapterId)?.title}</span>}
+            {selectedArchetypeId && <span>{archetypes.find(a => a.id === selectedArchetypeId)?.icon} {archetypes.find(a => a.id === selectedArchetypeId)?.name}</span>}
+          </div>
+        )}
+      </div>
+      
       {/* Association Hint */}
       {characters.length > 0 && (
          <div className="bg-primary-light text-primary border border-primary/20 text-xs px-4 py-2 rounded-lg mb-6 flex items-center gap-2">
@@ -369,12 +607,15 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
             <div 
                 key={char.id} 
                 onClick={() => startEdit(char)}
-                className="bg-white p-6 rounded-xl shadow-sm border border-ink-200 group relative hover:border-primary/50 hover:shadow-md transition-all duration-300 cursor-pointer flex flex-col h-full"
+                className={`bg-white p-6 rounded-xl shadow-sm border border-ink-200 group relative hover:border-primary/50 hover:shadow-md transition-all duration-300 cursor-pointer flex flex-col h-full ${char.isActive === false ? 'opacity-60' : ''}`}
             >
                 <div className="flex justify-between items-start mb-4">
                     <div>
                         <h3 className="text-xl font-bold text-ink-900 flex items-center gap-2">
                             {char.name}
+                            {char.isActive === false && (
+                              <span className="text-xs bg-ink-200 text-ink-500 px-2 py-0.5 rounded">已退场</span>
+                            )}
                             <Edit2 size={14} className="opacity-0 group-hover:opacity-100 text-primary" />
                         </h3>
                         <span className="inline-block mt-1 px-2 py-0.5 bg-ink-100 text-primary text-xs font-semibold rounded-full border border-ink-200">
@@ -392,9 +633,24 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
                 <div className="space-y-4 flex-1">
                     <div>
                          <p className="text-sm text-ink-600 italic border-l-2 border-primary/30 pl-3 py-1">
-                             “{char.description}”
+                             "{char.description}"
                          </p>
                     </div>
+                    
+                    {/* New: Display speakingStyle and motivation */}
+                    {char.speakingStyle && (
+                      <div className="text-xs">
+                        <span className="font-bold text-ink-400 uppercase tracking-wide">对话风格</span>
+                        <p className="text-ink-700 mt-1">{char.speakingStyle}</p>
+                      </div>
+                    )}
+                    {char.motivation && (
+                      <div className="text-xs">
+                        <span className="font-bold text-ink-400 uppercase tracking-wide">核心驱动力</span>
+                        <p className="text-ink-700 mt-1 line-clamp-2">{char.motivation}</p>
+                      </div>
+                    )}
+                    
                     {char.appearance && (
                          <div className="text-xs">
                              <span className="font-bold text-ink-400 uppercase tracking-wide">外貌</span>
@@ -406,6 +662,17 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
                              <span className="font-bold text-ink-400 uppercase tracking-wide">背景</span>
                              <p className="text-ink-700 mt-1 line-clamp-2">{char.background}</p>
                          </div>
+                    )}
+                    
+                    {/* Tags display */}
+                    {char.tags && char.tags.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {char.tags.map((tag, idx) => (
+                          <span key={idx} className="text-xs bg-primary-light text-primary px-2 py-0.5 rounded-full">
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
                     )}
                 </div>
             </div>
@@ -420,10 +687,11 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
         </div>
       )}
 
+
       {/* Edit Modal */}
       {editingId && (
           <div className="fixed inset-0 bg-black/20 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-              <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl h-[90vh] flex flex-col animate-fade-in">
+              <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl h-[90vh] flex flex-col animate-fade-in">
                   <div className="px-6 py-4 border-b border-ink-100 flex justify-between items-center bg-ink-50 shrink-0">
                       <h3 className="font-bold text-lg text-ink-900 flex items-center gap-2">
                           <User size={20} />
@@ -435,9 +703,27 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
                   </div>
                   
                   <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                      <div className="grid grid-cols-2 gap-6">
+                      {/* Validation Errors */}
+                      {validationErrors.length > 0 && (
+                        <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                          <div className="flex items-center gap-2 text-red-600 text-sm font-bold mb-1">
+                            <AlertCircle size={16} />
+                            请修正以下问题：
+                          </div>
+                          <ul className="text-red-600 text-xs list-disc list-inside">
+                            {validationErrors.map((err, idx) => (
+                              <li key={idx}>{err}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      
+                      {/* Basic Info Section */}
+                      <div className="bg-ink-50 p-4 rounded-lg">
+                        <h4 className="text-sm font-bold text-ink-700 mb-3">基础信息</h4>
+                        <div className="grid grid-cols-2 gap-4">
                           <div>
-                              <label className="block text-xs font-bold text-ink-500 uppercase mb-1">姓名</label>
+                              <label className="block text-xs font-bold text-ink-500 uppercase mb-1">姓名 *</label>
                               <div className="flex gap-2">
                                 <input 
                                     type="text" 
@@ -462,11 +748,37 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
                                 value={editForm.role || ''} 
                                 onChange={e => setEditForm({...editForm, role: e.target.value})}
                                 className="w-full p-2.5 border border-ink-300 rounded-lg focus:ring-2 focus:ring-primary outline-none"
+                                placeholder="如：主角、反派、配角"
                               />
                           </div>
+                          <div>
+                              <label className="block text-xs font-bold text-ink-500 uppercase mb-1">性别</label>
+                              <select
+                                value={editForm.gender || 'unknown'}
+                                onChange={e => setEditForm({...editForm, gender: e.target.value as CharacterGender})}
+                                className="w-full p-2.5 border border-ink-300 rounded-lg focus:ring-2 focus:ring-primary outline-none"
+                              >
+                                <option value="unknown">未知</option>
+                                <option value="male">男</option>
+                                <option value="female">女</option>
+                                <option value="other">其他</option>
+                              </select>
+                          </div>
+                          <div>
+                              <label className="block text-xs font-bold text-ink-500 uppercase mb-1">年龄段</label>
+                              <input 
+                                type="text" 
+                                value={editForm.age || ''} 
+                                onChange={e => setEditForm({...editForm, age: e.target.value})}
+                                className="w-full p-2.5 border border-ink-300 rounded-lg focus:ring-2 focus:ring-primary outline-none"
+                                placeholder="如：青年、中年、老年"
+                              />
+                          </div>
+                        </div>
                       </div>
 
-                       <div>
+                      {/* Description */}
+                      <div>
                           <label className="block text-xs font-bold text-ink-500 uppercase mb-1">一句话简介</label>
                           <input 
                             type="text"
@@ -476,6 +788,84 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
                           />
                       </div>
 
+                      {/* AI Writing Guidance Section */}
+                      <div className="bg-primary-light/30 p-4 rounded-lg border border-primary/20">
+                        <h4 className="text-sm font-bold text-primary mb-3 flex items-center gap-2">
+                          <Sparkles size={16} />
+                          AI 写作指导字段
+                        </h4>
+                        
+                        <div className="space-y-4">
+                          {/* Speaking Style */}
+                          <div>
+                            <label className="block text-xs font-bold text-ink-500 uppercase mb-1">
+                              对话风格 * <span className="text-ink-400 font-normal">(必填，用于指导 AI 生成差异化对话)</span>
+                            </label>
+                            <input 
+                              type="text"
+                              value={editForm.speakingStyle || ''} 
+                              onChange={e => setEditForm({...editForm, speakingStyle: e.target.value})}
+                              className="w-full p-2.5 border border-ink-300 rounded-lg focus:ring-2 focus:ring-primary outline-none mb-2"
+                              placeholder="如：傲慢、温柔、毒舌、神秘"
+                            />
+                            <div className="flex flex-wrap gap-1">
+                              {SPEAKING_STYLE_OPTIONS.map(style => (
+                                <button
+                                  key={style}
+                                  type="button"
+                                  onClick={() => {
+                                    const current = editForm.speakingStyle || '';
+                                    const newStyle = current ? `${current}、${style}` : style;
+                                    setEditForm({...editForm, speakingStyle: newStyle});
+                                  }}
+                                  className="text-xs px-2 py-1 bg-white border border-ink-200 rounded hover:border-primary hover:text-primary transition"
+                                >
+                                  {style}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                          
+                          {/* Motivation */}
+                          <div>
+                            <label className="block text-xs font-bold text-ink-500 uppercase mb-1">
+                              核心驱动力 * <span className="text-ink-400 font-normal">(必填，角色行动的根本动机)</span>
+                            </label>
+                            <textarea 
+                              value={editForm.motivation || ''} 
+                              onChange={e => setEditForm({...editForm, motivation: e.target.value})}
+                              className="w-full p-3 border border-ink-300 rounded-lg focus:ring-2 focus:ring-primary outline-none h-20 resize-none"
+                              placeholder="如：复仇、守护家人、追求力量、寻找真相"
+                            />
+                          </div>
+                          
+                          {/* Fears */}
+                          <div>
+                            <label className="block text-xs font-bold text-ink-500 uppercase mb-1">弱点/恐惧</label>
+                            <textarea 
+                              value={editForm.fears || ''} 
+                              onChange={e => setEditForm({...editForm, fears: e.target.value})}
+                              className="w-full p-3 border border-ink-300 rounded-lg focus:ring-2 focus:ring-primary outline-none h-20 resize-none"
+                              placeholder="如：害怕失去、恐高、无法面对过去"
+                            />
+                          </div>
+                          
+                          {/* Narrative Function */}
+                          <div>
+                            <label className="block text-xs font-bold text-ink-500 uppercase mb-1">叙事功能</label>
+                            <input 
+                              type="text"
+                              value={editForm.narrativeFunction || ''} 
+                              onChange={e => setEditForm({...editForm, narrativeFunction: e.target.value})}
+                              className="w-full p-2.5 border border-ink-300 rounded-lg focus:ring-2 focus:ring-primary outline-none"
+                              placeholder="如：推动剧情、制造冲突、提供信息、情感支撑"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+
+                      {/* Core Settings Section */}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                            <div>
                                 <label className="block text-xs font-bold text-ink-500 uppercase mb-1">外貌描写</label>
@@ -483,7 +873,7 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
                                     value={editForm.appearance || ''} 
                                     onChange={e => setEditForm({...editForm, appearance: e.target.value})}
                                     className="w-full p-3 border border-ink-300 rounded-lg focus:ring-2 focus:ring-primary outline-none h-32 resize-none"
-                                    placeholder="身高、发色、穿着、 distinctive features..."
+                                    placeholder="身高、发色、穿着、distinctive features..."
                                 />
                             </div>
                             <div>
@@ -507,16 +897,161 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
                           />
                       </div>
 
-                      {/* Manual Relationship Editor */}
+                      {/* Dynamic Status Section */}
+                      <div className="bg-ink-50 p-4 rounded-lg">
+                        <div className="flex justify-between items-center mb-3">
+                          <h4 className="text-sm font-bold text-ink-700 flex items-center gap-2">
+                            <RefreshCw size={16} />
+                            动态状态
+                          </h4>
+                          {editForm.id && characters.find(c => c.id === editForm.id) && (
+                            <button
+                              onClick={() => handleSyncStatus(editForm as Character)}
+                              disabled={syncingCharacterId === editForm.id}
+                              className="text-xs px-3 py-1.5 bg-primary text-white rounded-lg hover:bg-primary-hover transition flex items-center gap-1"
+                            >
+                              {syncingCharacterId === editForm.id ? (
+                                <><Loader2 size={12} className="animate-spin" /> 分析中...</>
+                              ) : (
+                                <><RefreshCw size={12} /> 同步状态</>
+                              )}
+                            </button>
+                          )}
+                        </div>
+                        
+                        {/* Sync Suggestion Display */}
+                        {syncSuggestion && (
+                          <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                            <div className="text-sm font-bold text-yellow-700 mb-2">AI 建议更新：</div>
+                            <div className="text-xs text-yellow-600 mb-2">{syncSuggestion.reasoning}</div>
+                            <div className="space-y-1 text-xs">
+                              {syncSuggestion.suggestedStatus && (
+                                <div><span className="font-bold">状态:</span> {syncSuggestion.suggestedStatus}</div>
+                              )}
+                              {syncSuggestion.suggestedTags && (
+                                <div><span className="font-bold">标签:</span> {syncSuggestion.suggestedTags.join(', ')}</div>
+                              )}
+                              {syncSuggestion.suggestedDescription && (
+                                <div><span className="font-bold">简介:</span> {syncSuggestion.suggestedDescription}</div>
+                              )}
+                            </div>
+                            <div className="flex gap-2 mt-3">
+                              <button
+                                onClick={applySyncSuggestion}
+                                className="text-xs px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600 flex items-center gap-1"
+                              >
+                                <Check size={12} /> 应用建议
+                              </button>
+                              <button
+                                onClick={() => setSyncSuggestion(null)}
+                                className="text-xs px-3 py-1 bg-ink-200 text-ink-600 rounded hover:bg-ink-300"
+                              >
+                                忽略
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                        
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-xs font-bold text-ink-500 uppercase mb-1">当前状态</label>
+                            <input 
+                              type="text"
+                              value={editForm.status || ''} 
+                              onChange={e => setEditForm({...editForm, status: e.target.value})}
+                              className="w-full p-2.5 border border-ink-300 rounded-lg focus:ring-2 focus:ring-primary outline-none"
+                              placeholder="如：健康、重伤、失踪、死亡"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-ink-500 uppercase mb-1 flex items-center gap-1">
+                              是否活跃
+                              <span className="text-ink-400 font-normal">(退场角色设为否)</span>
+                            </label>
+                            <select
+                              value={editForm.isActive === false ? 'false' : 'true'}
+                              onChange={e => setEditForm({...editForm, isActive: e.target.value === 'true'})}
+                              className="w-full p-2.5 border border-ink-300 rounded-lg focus:ring-2 focus:ring-primary outline-none"
+                            >
+                              <option value="true">是 - 活跃中</option>
+                              <option value="false">否 - 已退场</option>
+                            </select>
+                          </div>
+                        </div>
+                        
+                        {/* Tags */}
+                        <div className="mt-4">
+                          <label className="block text-xs font-bold text-ink-500 uppercase mb-1 flex items-center gap-1">
+                            <Tag size={12} />
+                            标签
+                          </label>
+                          <div className="flex gap-2 mb-2">
+                            <input 
+                              type="text"
+                              value={tagInput}
+                              onChange={e => setTagInput(e.target.value)}
+                              onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addTag())}
+                              className="flex-1 p-2 border border-ink-300 rounded-lg focus:ring-2 focus:ring-primary outline-none text-sm"
+                              placeholder="输入标签后按回车添加"
+                            />
+                            <button
+                              onClick={addTag}
+                              className="px-3 py-2 bg-ink-200 text-ink-600 rounded-lg hover:bg-ink-300 transition"
+                            >
+                              <Plus size={16} />
+                            </button>
+                          </div>
+                          <div className="flex flex-wrap gap-1">
+                            {(editForm.tags || []).map((tag, idx) => (
+                              <span 
+                                key={idx} 
+                                className="text-xs bg-primary-light text-primary px-2 py-1 rounded-full flex items-center gap-1"
+                              >
+                                {tag}
+                                <button 
+                                  onClick={() => removeTag(tag)}
+                                  className="hover:text-red-500"
+                                >
+                                  <X size={12} />
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+
+                      {/* Relationship Editor with Attitude */}
                       <div>
                            <label className="block text-xs font-bold text-ink-500 uppercase mb-2">人际关系</label>
                            <div className="bg-ink-50 p-4 rounded-lg border border-ink-100 text-sm space-y-2">
                                {editForm.relationships && editForm.relationships.length > 0 ? (
                                    editForm.relationships.map((rel, idx) => (
-                                       <div key={idx} className="flex items-center gap-2">
+                                       <div key={idx} className="flex items-center gap-2 flex-wrap bg-white p-2 rounded border border-ink-200">
                                             <span className="font-bold text-primary">{rel.targetName}</span>
-                                            <span className="text-ink-400">is</span>
-                                            <span className="bg-white border border-ink-200 px-2 py-0.5 rounded text-xs">{rel.relation}</span>
+                                            <span className="text-ink-400">关系:</span>
+                                            <input
+                                              type="text"
+                                              value={rel.relation}
+                                              onChange={e => {
+                                                const newRels = [...(editForm.relationships || [])];
+                                                newRels[idx] = { ...newRels[idx], relation: e.target.value };
+                                                setEditForm({...editForm, relationships: newRels});
+                                              }}
+                                              className="bg-white border border-ink-200 px-2 py-0.5 rounded text-xs w-24"
+                                            />
+                                            <span className="text-ink-400">态度:</span>
+                                            <input
+                                              type="text"
+                                              value={rel.attitude || ''}
+                                              onChange={e => {
+                                                const newRels = [...(editForm.relationships || [])];
+                                                newRels[idx] = { ...newRels[idx], attitude: e.target.value };
+                                                setEditForm({...editForm, relationships: newRels});
+                                              }}
+                                              className="bg-white border border-ink-200 px-2 py-0.5 rounded text-xs w-24"
+                                              placeholder="如：敬重、厌恶"
+                                            />
                                             <button 
                                                 onClick={() => {
                                                     const newRels = editForm.relationships?.filter((_, i) => i !== idx);
@@ -524,7 +1059,7 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
                                                 }}
                                                 className="text-red-400 hover:text-red-600 ml-auto"
                                             >
-                                                &times;
+                                                <X size={14} />
                                             </button>
                                        </div>
                                    ))
@@ -532,9 +1067,9 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
                                    <p className="text-ink-400 italic">暂无记录关系。</p>
                                )}
                                
-                               <div className="pt-2 border-t border-ink-200 mt-2 flex gap-2">
+                               <div className="pt-2 border-t border-ink-200 mt-2 flex gap-2 flex-wrap">
                                    <select 
-                                     className="text-xs p-1 border rounded text-ink-800"
+                                     className="text-xs p-1.5 border rounded text-ink-800"
                                      id="rel-target"
                                    >
                                        {characters.filter(c => c.id !== editForm.id).map(c => (
@@ -544,23 +1079,36 @@ const CharacterForge: React.FC<CharacterForgeProps> = ({ characters, setCharacte
                                    <input 
                                      type="text" 
                                      placeholder="关系 (如: 朋友)" 
-                                     className="text-xs p-1 border rounded flex-1"
+                                     className="text-xs p-1.5 border rounded flex-1 min-w-[100px]"
                                      id="rel-desc"
+                                   />
+                                   <input 
+                                     type="text" 
+                                     placeholder="态度 (如: 信任)" 
+                                     className="text-xs p-1.5 border rounded flex-1 min-w-[100px]"
+                                     id="rel-attitude"
                                    />
                                    <button 
                                      onClick={() => {
                                          const select = document.getElementById('rel-target') as HTMLSelectElement;
                                          const input = document.getElementById('rel-desc') as HTMLInputElement;
+                                         const attitudeInput = document.getElementById('rel-attitude') as HTMLInputElement;
                                          if(!select.value || !input.value) return;
                                          const [tid, tname] = select.value.split('|');
-                                         const newRel = { targetId: tid, targetName: tname, relation: input.value };
+                                         const newRel = { 
+                                           targetId: tid, 
+                                           targetName: tname, 
+                                           relation: input.value,
+                                           attitude: attitudeInput.value || ''
+                                         };
                                          setEditForm({
                                              ...editForm, 
                                              relationships: [...(editForm.relationships || []), newRel]
                                          });
                                          input.value = '';
+                                         attitudeInput.value = '';
                                      }}
-                                     className="text-xs bg-ink-200 text-ink-700 px-2 rounded hover:bg-ink-300"
+                                     className="text-xs bg-primary text-white px-3 py-1.5 rounded hover:bg-primary-hover"
                                    >
                                        添加
                                    </button>

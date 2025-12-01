@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 import { WikiEntry, WikiCategory, WorldStructure, AppSettings, NovelConfig, Chapter, GenerationStatus } from '../types';
 import { analyzeChapterForWiki } from '../services/geminiService';
 import { db } from '../services/db';
+import { autoIndexOnSave } from '../services/ragService';
 import { BookMarked, Search, Plus, Filter, Edit2, Trash2, ScanSearch, Loader2, Save, X, CheckCircle } from 'lucide-react';
 
 interface WikiSystemProps {
@@ -68,6 +69,10 @@ const WikiSystem: React.FC<WikiSystemProps> = ({ structure, setStructure, chapte
       }
       
       setStructure({ ...structure, wikiEntries: updated });
+      
+      // Auto-index wiki entry for RAG
+      autoIndexOnSave('wiki', newEntry, settings);
+      
       setEditingId(null);
       setEditForm({});
   };
@@ -128,6 +133,10 @@ const WikiSystem: React.FC<WikiSystemProps> = ({ structure, setStructure, chapte
           ...structure,
           wikiEntries: [...(structure.wikiEntries || []), entry]
       });
+      
+      // Auto-index accepted wiki entry for RAG
+      autoIndexOnSave('wiki', entry, settings);
+      
       setScannedEntries(scannedEntries.filter(e => e.id !== entry.id));
   };
 

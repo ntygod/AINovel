@@ -1,7 +1,9 @@
 
 import React, { useState, useEffect } from 'react';
-import { AppSettings, AIProvider } from '../types';
+import { AppSettings, AIProvider, AISceneType, AIAllSceneType, SceneModelConfig } from '../types';
 import { Settings, Key, Palette, Cpu, Save, AlertTriangle, CheckCircle, Server, Globe, Video, Volume2, BarChart3, TrendingUp, DollarSign, Trash2 } from 'lucide-react';
+import SceneModelPanel from './SceneModelPanel';
+import { testSceneConfig } from '../services/geminiService';
 import { tokenCounter } from '../services/tokenCounter';
 
 interface AppSettingsProps {
@@ -42,15 +44,7 @@ const DEFAULT_MODELS: Record<AIProvider, { id: string; name: string }[]> = {
   ]
 };
 
-const VIDEO_MODELS = [
-    { id: 'veo-3.1-fast-generate-preview', name: 'Veo 3.1 Fast (推荐)' },
-    { id: 'veo-3.1-generate-preview', name: 'Veo 3.1 High Quality' }
-];
-
-const SPEECH_MODELS = [
-    { id: 'gemini-2.5-flash-preview-tts', name: 'Gemini 2.5 TTS (推荐)' },
-    { id: 'gemini-2.5-flash-native-audio-preview-09-2025', name: 'Gemini Native Audio' }
-];
+// VIDEO_MODELS and SPEECH_MODELS moved to SceneModelPanel.tsx
 
 const DEFAULT_BASE_URLS: Record<string, string> = {
   deepseek: 'https://api.deepseek.com',
@@ -239,42 +233,121 @@ const AppSettingsView: React.FC<AppSettingsProps> = ({ settings, onSave }) => {
             )}
         </div>
 
-        {/* Multimodal Models (Video/Speech) */}
+        {/* 🆕 场景模型配置 - Using SceneModelPanel components */}
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-ink-200">
+            <div className="flex items-center gap-2 mb-4 text-ink-800">
+                <Cpu size={20} />
+                <h3 className="text-lg font-bold">场景模型配置</h3>
+            </div>
+            <p className="text-sm text-ink-500 mb-4">
+                为不同 AI 任务配置独立的服务商和模型。支持跨服务商混合使用，实现成本优化和能力互补。
+            </p>
+            
+            <div className="space-y-3">
+                <SceneModelPanel
+                    scene="creative"
+                    sceneName="创意生成"
+                    sceneDescription="项目创意、角色名等轻量级任务"
+                    sceneIcon="🎨"
+                    config={localSettings.sceneModels?.creative}
+                    defaultSettings={localSettings}
+                    allSceneConfigs={localSettings.sceneModels as Record<AISceneType, string | SceneModelConfig | undefined>}
+                    onChange={(config) => handleChange('sceneModels', {
+                        ...localSettings.sceneModels,
+                        creative: config
+                    })}
+                    onTest={testSceneConfig}
+                />
+                
+                <SceneModelPanel
+                    scene="structure"
+                    sceneName="结构化生成"
+                    sceneDescription="世界观、角色、细纲等需要逻辑能力的任务"
+                    sceneIcon="🏗️"
+                    config={localSettings.sceneModels?.structure}
+                    defaultSettings={localSettings}
+                    allSceneConfigs={localSettings.sceneModels as Record<AISceneType, string | SceneModelConfig | undefined>}
+                    onChange={(config) => handleChange('sceneModels', {
+                        ...localSettings.sceneModels,
+                        structure: config
+                    })}
+                    onTest={testSceneConfig}
+                />
+                
+                <SceneModelPanel
+                    scene="writing"
+                    sceneName="长文写作"
+                    sceneDescription="章节内容、润色等核心写作任务"
+                    sceneIcon="✍️"
+                    config={localSettings.sceneModels?.writing}
+                    defaultSettings={localSettings}
+                    allSceneConfigs={localSettings.sceneModels as Record<AISceneType, string | SceneModelConfig | undefined>}
+                    onChange={(config) => handleChange('sceneModels', {
+                        ...localSettings.sceneModels,
+                        writing: config
+                    })}
+                    onTest={testSceneConfig}
+                />
+                
+                <SceneModelPanel
+                    scene="analysis"
+                    sceneName="分析任务"
+                    sceneDescription="章节分析、Wiki提取等需要理解能力的任务"
+                    sceneIcon="🔍"
+                    config={localSettings.sceneModels?.analysis}
+                    defaultSettings={localSettings}
+                    allSceneConfigs={localSettings.sceneModels as Record<AISceneType, string | SceneModelConfig | undefined>}
+                    onChange={(config) => handleChange('sceneModels', {
+                        ...localSettings.sceneModels,
+                        analysis: config
+                    })}
+                    onTest={testSceneConfig}
+                />
+            </div>
+        </div>
+
+        {/* Multimodal Models (Video/Speech) - Using SceneModelPanel */}
         <div className="bg-white p-6 rounded-xl shadow-sm border border-ink-200">
              <div className="flex items-center gap-2 mb-4 text-ink-800">
                 <Video size={20} />
                 <h3 className="text-lg font-bold">多模态模型设置</h3>
             </div>
+            <p className="text-sm text-ink-500 mb-4">
+                为视频和语音生成配置独立的服务商和模型。目前主要支持 Google 的 Veo 和 TTS 模型。
+            </p>
             
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                    <label className="block text-sm font-medium text-ink-700 mb-2 flex items-center gap-2">
-                        <Video size={16} /> 视频生成模型 (Video)
-                    </label>
-                    <select 
-                        value={localSettings.videoModel || 'veo-3.1-fast-generate-preview'}
-                        onChange={(e) => handleChange('videoModel', e.target.value)}
-                        className="w-full p-3 border border-ink-300 rounded-lg focus:ring-2 focus:ring-primary outline-none bg-white font-mono text-sm"
-                    >
-                        {VIDEO_MODELS.map(m => (
-                            <option key={m.id} value={m.id}>{m.name}</option>
-                        ))}
-                    </select>
-                </div>
-                <div>
-                    <label className="block text-sm font-medium text-ink-700 mb-2 flex items-center gap-2">
-                        <Volume2 size={16} /> 语音生成模型 (TTS)
-                    </label>
-                    <select 
-                        value={localSettings.speechModel || 'gemini-2.5-flash-preview-tts'}
-                        onChange={(e) => handleChange('speechModel', e.target.value)}
-                        className="w-full p-3 border border-ink-300 rounded-lg focus:ring-2 focus:ring-primary outline-none bg-white font-mono text-sm"
-                    >
-                        {SPEECH_MODELS.map(m => (
-                            <option key={m.id} value={m.id}>{m.name}</option>
-                        ))}
-                    </select>
-                </div>
+            <div className="space-y-3">
+                <SceneModelPanel
+                    scene="video"
+                    sceneName="视频生成"
+                    sceneDescription="AI 视频工作室，生成章节可视化视频"
+                    sceneIcon="🎬"
+                    config={localSettings.sceneModels?.video}
+                    defaultSettings={localSettings}
+                    allSceneConfigs={localSettings.sceneModels as Record<AIAllSceneType, string | SceneModelConfig | undefined>}
+                    onChange={(config) => handleChange('sceneModels', {
+                        ...localSettings.sceneModels,
+                        video: config
+                    })}
+                    onTest={testSceneConfig}
+                    isMultimodal={true}
+                />
+                
+                <SceneModelPanel
+                    scene="speech"
+                    sceneName="语音生成"
+                    sceneDescription="TTS 文字转语音，朗读章节内容"
+                    sceneIcon="🔊"
+                    config={localSettings.sceneModels?.speech}
+                    defaultSettings={localSettings}
+                    allSceneConfigs={localSettings.sceneModels as Record<AIAllSceneType, string | SceneModelConfig | undefined>}
+                    onChange={(config) => handleChange('sceneModels', {
+                        ...localSettings.sceneModels,
+                        speech: config
+                    })}
+                    onTest={testSceneConfig}
+                    isMultimodal={true}
+                />
             </div>
         </div>
 

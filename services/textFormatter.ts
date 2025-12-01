@@ -17,6 +17,15 @@ export function formatAIGeneratedText(text: string): string {
     
     // 2. 移除首尾空白
     formatted = formatted.trim();
+
+    // [新增] 兜底策略：如果全文几乎没有双换行（\n\n），但有单换行（\n），则强制将单换行转换为双换行
+    const doubleNewlineCount = (formatted.match(/\n\n/g) || []).length;
+    const singleNewlineCount = (formatted.match(/\n/g) || []).length;
+    
+    // 如果双换行很少，说明 AI 可能只用了单换行分段
+    if (doubleNewlineCount < singleNewlineCount * 0.1) {
+        formatted = formatted.replace(/\n/g, '\n\n');
+    }
     
     // 3. 处理多余的空行（超过2个连续空行压缩为2个）
     formatted = formatted.replace(/\n{4,}/g, '\n\n\n');

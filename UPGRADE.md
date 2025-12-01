@@ -19,7 +19,7 @@ InkFlow 系统升级需求文档 (PRD) v2.0
 细纲断层：细纲生成仅依赖摘要，缺乏对伏笔和细节的连续性捕捉。
 
 2. 功能需求详情 (Functional Requirements)
-2.1 模块一：多层级剧情结构 (Hierarchical Plot Management)
+2.1 模块一：多层级剧情结构 (Hierarchical Plot Management) 已完成
 目标：引入“卷（Volume）”概念，建立书 -> 卷 -> 章 -> 细纲的四级结构。
 
 FR-1.1 分卷管理：
@@ -66,7 +66,7 @@ Prompt 逻辑：输入本章细纲 + 检索到的设定 -> 提问：“细纲中
 
 若发现冲突，弹窗警告用户，或自动在 System Prompt 中添加约束（Constraint）。
 
-FR-3.2 伏笔回收追踪 (Plot Hole Tracker)：
+FR-3.2 伏笔回收追踪 (Plot Hole Tracker)：已完成
 
 新增 OpenLoops（未闭环情节）数据结构。
 
@@ -151,3 +151,8 @@ P2 (长期价值)：动态世界演进。对于 50 万字以上的小说至关�
 P3 (完善)：逻辑一致性卫士。技术实现难度较大，可后期迭代。
 
 这份文档可以直接作为下一阶段开发的任务清单（Backlog）。
+
+
+在初始化时只需要生成重要角色
+
+后续的角色应该是服务当前剧情的，所以需要参考上下文及本卷意图
