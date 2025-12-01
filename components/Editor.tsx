@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Chapter, Character, NovelConfig, GenerationStatus, AppSettings, WorldStructure, WikiEntry, ChapterSnapshot, Volume, PlotLoop, PlotLoopStatus, Faction, ChapterType } from '../types';
 import { streamChapterContent, streamTextPolish, stripHtml, indexContent, generateChapterBeats, getChapterAncestors } from '../services/geminiService';
+import { runPreflightCheck, PreflightResult, ConflictWarning } from '../services/preflightService';
 import { findPreviousChapter, extractLastContent } from '../services/volumeService';
 import { 
     indexChapterContent, 
@@ -13,13 +14,21 @@ import {
 } from '../services/ragService';
 import { prepareContentForEditor, countWords } from '../services/textFormatter';
 import { analyzeChapterForEvolution, ChapterAnalysisResult, EvolutionSuggestion, applySelectedSuggestions } from '../services/evolutionService';
+import { 
+  saveStyleSample, 
+  shouldSaveAsStyleSample, 
+  retrieveSimilarStyleSamples, 
+  buildStylePromptSection,
+  getStyleStats,
+  StyleStats 
+} from '../services/styleService';
 import { db } from '../services/db';
 import RichEditor from './RichEditor';
 import PlotLoopPanel from './PlotLoopPanel';
 import PlotLoopDetail from './PlotLoopDetail';
 import QuickCharacterModal from './QuickCharacterModal';
 import EvolutionPanel from './EvolutionPanel';
-import { PenTool, RefreshCw, Loader2, ChevronLeft, ChevronRight, User, Info, Wand2, Scissors, Zap, Maximize2, X, Check, Copy, Sparkles, BookMarked, Minimize2, PanelRightClose, PanelRightOpen, Type, Target, History, RotateCcw, Clock, Brain, ListChecks, GitBranch, Plus, ArrowLeft, Link2, UserPlus, Search, Database } from 'lucide-react';
+import { PenTool, RefreshCw, Loader2, ChevronLeft, ChevronRight, User, Info, Wand2, Scissors, Zap, Maximize2, X, Check, Copy, Sparkles, BookMarked, Minimize2, PanelRightClose, PanelRightOpen, Type, Target, History, RotateCcw, Clock, Brain, ListChecks, GitBranch, Plus, ArrowLeft, Link2, UserPlus, Search, Database, AlertTriangle } from 'lucide-react';
 
 interface EditorProps {
   chapter: Chapter | null;
@@ -121,6 +130,16 @@ const Editor: React.FC<EditorProps> = ({
   // 摘要编辑状态
   const [isEditingSummary, setIsEditingSummary] = useState(false);
   const [editingSummaryText, setEditingSummaryText] = useState('');
+  
+  // 预检状态 (Logic Pre-flight Check)
+  const [preflightResult, setPreflightResult] = useState<PreflightResult | null>(null);
+  const [isRunningPreflight, setIsRunningPreflight] = useState(false);
+
+  // 🆕 风格学习状态 (Style Learning Loop)
+  const [lastAIGeneratedContent, setLastAIGeneratedContent] = useState<string>('');
+  const [contentBeforeAI, setContentBeforeAI] = useState<string>('');
+  const [styleStats, setStyleStats] = useState<StyleStats | null>(null);
+  const [styleSampleSaved, setStyleSampleSaved] = useState(false);
 
   // History / Snapshots
   const [snapshots, setSnapshots] = useState<ChapterSnapshot[]>([]);
@@ -197,7 +216,60 @@ const Editor: React.FC<EditorProps> = ({
     setShowAnalysisButton(false);
     setManualCharacterIds([]); // 重置手动选择的角色
     setShowCharacterPicker(false);
+    // 🆕 重置风格学习状态
+    setLastAIGeneratedContent('');
+    setContentBeforeAI('');
+    setStyleSampleSaved(false);
   }, [chapter?.id]);
+
+  // 🆕 风格学习：检测用户对 AI 生成内容的修改并保存样本
+  useEffect(() => {
+    if (!chapter || !lastAIGeneratedContent || styleSampleSaved) return;
+    if (!settings.useRAG || !config.title) return;
+    
+    // 获取 AI 生成后用户修改的部分
+    const currentContent = stripHtml(chapter.content || '');
+    const aiGeneratedPart = stripHtml(lastAIGeneratedContent);
+    
+    // 计算用户修改后的内容（从 AI 生成位置开始）
+    const contentBeforeAILength = stripHtml(contentBeforeAI).length;
+    const userModifiedPart = currentContent.slice(contentBeforeAILength);
+    
+    // 如果用户修改了 AI 生成的内容，检查是否值得保存
+    if (userModifiedPart && aiGeneratedPart) {
+      const timer = setTimeout(async () => {
+        if (shouldSaveAsStyleSample(aiGeneratedPart, userModifiedPart, 0.3, 100)) {
+          try {
+            const sample = await saveStyleSample(
+              config.title,
+              chapter.id,
+              aiGeneratedPart,
+              userModifiedPart,
+              settings
+            );
+            if (sample) {
+              setStyleSampleSaved(true);
+              console.log('Style sample saved with edit ratio:', sample.editRatio.toFixed(2));
+              // 更新风格统计
+              const stats = await getStyleStats(config.title);
+              setStyleStats(stats);
+            }
+          } catch (e) {
+            console.warn('Failed to save style sample:', e);
+          }
+        }
+      }, 5000); // 5 秒防抖，避免频繁保存
+      
+      return () => clearTimeout(timer);
+    }
+  }, [chapter?.content, lastAIGeneratedContent, contentBeforeAI, styleSampleSaved, settings, config.title, chapter?.id]);
+
+  // 🆕 加载风格学习统计
+  useEffect(() => {
+    if (settings.useRAG && config.title) {
+      getStyleStats(config.title).then(setStyleStats);
+    }
+  }, [settings.useRAG, config.title]);
 
   // Auto-switch to evolution tab when analysis starts
   useEffect(() => {
@@ -282,10 +354,48 @@ const Editor: React.FC<EditorProps> = ({
           
           onUpdateChapter({ ...chapter, beats: validBeats });
           setBeatsStatus(GenerationStatus.COMPLETED);
+          
+          // 🆕 自动运行预检
+          runPreflightCheckForBeats(validBeats);
       } catch (e) {
           console.error('生成细纲失败:', e);
           alert(`生成细纲失败: ${e instanceof Error ? e.message : '未知错误'}`);
           setBeatsStatus(GenerationStatus.ERROR);
+      }
+  };
+  
+  // 🆕 预检函数
+  const runPreflightCheckForBeats = async (beats: string[]) => {
+      if (!chapter || !settings.apiKey) return;
+      
+      setIsRunningPreflight(true);
+      setPreflightResult(null);
+      
+      try {
+          const activePlotLoops = plotLoops.filter(
+              loop => loop.status === PlotLoopStatus.OPEN || loop.status === PlotLoopStatus.URGENT
+          );
+          
+          const recentChapters = allChapters
+              .filter(c => c.id !== chapter.id && c.order < chapter.order)
+              .sort((a, b) => b.order - a.order)
+              .slice(0, 5);
+          
+          const result = await runPreflightCheck({
+              beats,
+              chapterSummary: chapter.summary,
+              globalMemory: structure.globalMemory,
+              activePlotLoops,
+              recentChapters,
+              characters,
+              wikiEntries: structure.wikiEntries || []
+          }, settings);
+          
+          setPreflightResult(result);
+      } catch (e) {
+          console.error('预检失败:', e);
+      } finally {
+          setIsRunningPreflight(false);
       }
   };
 
@@ -499,9 +609,32 @@ const Editor: React.FC<EditorProps> = ({
     await createSnapshot("AI 续写前备份");
     setStatus(GenerationStatus.WRITING);
     
-    const startingContent = chapter.content || ""; 
+    const startingContent = chapter.content || "";
+    
+    // 🆕 风格学习：记录 AI 生成前的内容位置
+    setContentBeforeAI(startingContent);
+    setStyleSampleSaved(false);
 
     try {
+        // 🆕 风格学习：检索相似风格样本
+        let styleSamples: Awaited<ReturnType<typeof retrieveSimilarStyleSamples>> = [];
+        if (settings.useRAG && config.title) {
+          try {
+            styleSamples = await retrieveSimilarStyleSamples(
+              config.title, // 使用项目标题作为 projectId
+              chapter.summary || startingContent.slice(-500),
+              settings,
+              3
+            );
+            console.log(`Retrieved ${styleSamples.length} style samples for generation`);
+          } catch (e) {
+            console.warn('Failed to retrieve style samples:', e);
+          }
+        }
+        
+        // 🆕 构建风格提示词
+        const stylePrompt = buildStylePromptSection(styleSamples);
+
         // Pass all chapters, volumes, wiki entries and factions so streamChapterContent can use deep context
         // Requirements 1.5, 6.1, 6.2, 6.3, 6.4: Inject Wiki entries and faction info into prompt
         const responseStream = await streamChapterContent(
@@ -514,7 +647,8 @@ const Editor: React.FC<EditorProps> = ({
             volumes,
             plotLoops,
             structure.wikiEntries || [],
-            structure.factions || []
+            structure.factions || [],
+            stylePrompt // 🆕 传入风格提示词
         );
         
         let fullText = "";
@@ -535,6 +669,10 @@ const Editor: React.FC<EditorProps> = ({
         
         // 🆕 生成完成后，进行完整的格式化处理
         const formattedContent = startingContent + prepareContentForEditor(fullText);
+        
+        // 🆕 风格学习：记录 AI 生成的原始内容（用于后续比对）
+        setLastAIGeneratedContent(prepareContentForEditor(fullText));
+        
         onUpdateChapter({ 
             ...chapter, 
             content: formattedContent, 
@@ -764,6 +902,25 @@ const Editor: React.FC<EditorProps> = ({
                 ) : (
                   <><Database size={12} /><span>已索引</span></>
                 )}
+              </div>
+            )}
+            
+            {/* 🆕 Style Learning Indicator */}
+            {styleStats && styleStats.totalSamples > 0 && (
+              <div 
+                className="flex items-center gap-1.5 px-2 py-1 rounded text-xs bg-violet-50 text-violet-600 cursor-help"
+                title={`已学习 ${styleStats.totalSamples} 个风格样本，平均修改比例 ${(styleStats.avgEditRatio * 100).toFixed(0)}%`}
+              >
+                <Sparkles size={12} />
+                <span>风格学习: {styleStats.totalSamples}</span>
+              </div>
+            )}
+            
+            {/* Style Sample Saved Notification */}
+            {styleSampleSaved && (
+              <div className="flex items-center gap-1.5 px-2 py-1 rounded text-xs bg-violet-100 text-violet-700 animate-in fade-in duration-300">
+                <Check size={12} />
+                <span>风格已学习</span>
               </div>
             )}
             
@@ -1052,6 +1209,65 @@ const Editor: React.FC<EditorProps> = ({
                                      <Plus size={12} /> 添加节点
                                  </button>
                              </div>
+                             
+                             {/* 🆕 预检结果显示 - 有细纲时始终显示 */}
+                             {chapter.beats && chapter.beats.length > 0 && (
+                                 <div className="mt-3 p-3 rounded-lg border bg-white">
+                                     <div className="flex items-center justify-between mb-2">
+                                         <h5 className="text-xs font-bold text-ink-700 flex items-center gap-1">
+                                             <AlertTriangle size={12} /> 逻辑预检
+                                         </h5>
+                                         {!isRunningPreflight && (
+                                             <button
+                                                 onClick={() => runPreflightCheckForBeats(chapter.beats || [])}
+                                                 className="text-[10px] text-primary hover:underline"
+                                             >
+                                                 {preflightResult ? '重新检查' : '开始检查'}
+                                             </button>
+                                         )}
+                                     </div>
+                                     
+                                     {isRunningPreflight ? (
+                                         <div className="flex items-center gap-2 text-ink-500 text-xs py-2">
+                                             <Loader2 className="animate-spin" size={12} /> 正在检查逻辑一致性...
+                                         </div>
+                                     ) : preflightResult ? (
+                                         <div className="space-y-2">
+                                             {preflightResult.passed && preflightResult.warnings.length === 0 ? (
+                                                 <div className="text-xs text-green-600 flex items-center gap-1">
+                                                     <Check size={12} /> 未发现逻辑冲突
+                                                 </div>
+                                             ) : (
+                                                 preflightResult.warnings.map((warning, idx) => (
+                                                     <div 
+                                                         key={warning.id || idx}
+                                                         className={`p-2 rounded text-xs ${
+                                                             warning.severity === 'error' 
+                                                                 ? 'bg-red-50 border border-red-200 text-red-700'
+                                                                 : warning.severity === 'warning'
+                                                                 ? 'bg-yellow-50 border border-yellow-200 text-yellow-700'
+                                                                 : 'bg-blue-50 border border-blue-200 text-blue-700'
+                                                         }`}
+                                                     >
+                                                         <div className="font-bold flex items-center gap-1">
+                                                             {warning.severity === 'error' ? '❌' : warning.severity === 'warning' ? '⚠️' : 'ℹ️'}
+                                                             {warning.title}
+                                                         </div>
+                                                         <div className="mt-1 text-[10px] opacity-80">{warning.description}</div>
+                                                         {warning.suggestion && (
+                                                             <div className="mt-1 text-[10px] italic">💡 {warning.suggestion}</div>
+                                                         )}
+                                                     </div>
+                                                 ))
+                                             )}
+                                         </div>
+                                     ) : (
+                                         <div className="text-xs text-ink-400 py-1">
+                                             点击"开始检查"检测细纲与设定的逻辑冲突
+                                         </div>
+                                     )}
+                                 </div>
+                             )}
 
                          </div>
                      )}

@@ -33,7 +33,7 @@ const EMBEDDING_CACHE_TTL = 60 * 60 * 1000;
 /**
  * 余弦相似度计算
  */
-function cosineSimilarity(a: number[], b: number[]): number {
+export function cosineSimilarity(a: number[], b: number[]): number {
     if (!a || !b || a.length !== b.length) return 0;
     
     const dotProduct = a.reduce((sum, val, i) => sum + val * b[i], 0);
@@ -464,13 +464,22 @@ function calculateTextOverlap(text1: string, text2: string): number {
 }
 
 /**
- * 混合检索相关角色（向量 + 关键词 + 关系图谱）
+ * 混合检索相关角色（向量 + 关键词 + 深度图谱）
+ * 
+ * 增强版：支持多层关系遍历，捕捉深层人物纠葛
+ * 
+ * @param query - 查询文本
+ * @param allCharacters - 所有角色
+ * @param settings - 应用设置
+ * @param topK - 返回结果数量
+ * @param graphDepth - 图谱遍历深度（默认 2，即二度人脉）
  */
 export async function retrieveRelevantCharacters(
     query: string,
     allCharacters: Character[],
     settings: AppSettings,
-    topK: number = 5
+    topK: number = 5,
+    graphDepth: number = 2
 ): Promise<Character[]> {
     if (allCharacters.length === 0) return [];
     
@@ -489,7 +498,7 @@ export async function retrieveRelevantCharacters(
             }
         }
         
-        // 第一轮：计算基础分数
+        // 第一轮：计算基础分数（向量 + 关键词）
         const scores = allCharacters.map(character => {
             let vectorScore = 0;
             let keywordScore = 0;
@@ -517,24 +526,32 @@ export async function retrieveRelevantCharacters(
             return { character, score: finalScore, vectorScore, keywordScore };
         });
         
-        // 排序获取初步结果
+        // 排序获取初步结果（种子角色）
         const sortedScores = scores.sort((a, b) => b.score - a.score);
+        const seedResults = sortedScores.slice(0, Math.ceil(topK / 2));
+        const seedCharacterIds = seedResults.map(r => r.character.id);
         
-        // 第二轮：关系图谱扩展 - 如果某个角色被选中，其关联角色也应该被考虑
-        const topResults = sortedScores.slice(0, Math.ceil(topK / 2));
-        const relatedCharacterIds = new Set<string>();
+        // 第二轮：深度图谱检索 - 使用 BFS 遍历多层关系
+        const { retrieveWithGraph, getRelationWeight } = await import('./graphService');
+        const graphResults = retrieveWithGraph(seedCharacterIds, allCharacters, {
+            maxDepth: graphDepth,
+            depthDecay: 0.6,
+            minPathWeight: 0.1,
+            includeStartNodes: false, // 种子角色已经在结果中
+        });
         
-        for (const result of topResults) {
-            const relationships = result.character.relationships || [];
-            for (const rel of relationships) {
-                relatedCharacterIds.add(rel.targetId);
-            }
+        // 构建图谱分数映射
+        const graphScoreMap = new Map<string, number>();
+        for (const result of graphResults) {
+            // 根据关系强度和深度计算加成
+            const graphBonus = result.relevanceScore * 0.3; // 最高 0.3 的加成
+            graphScoreMap.set(result.character.id, graphBonus);
         }
         
-        // 为关联角色添加关系加成
+        // 为所有角色添加图谱加成
         const enhancedScores = sortedScores.map(s => {
-            const relationBonus = relatedCharacterIds.has(s.character.id) ? 0.15 : 0;
-            return { ...s, score: s.score + relationBonus };
+            const graphBonus = graphScoreMap.get(s.character.id) || 0;
+            return { ...s, score: s.score + graphBonus, graphBonus };
         });
         
         // 重新排序
@@ -556,12 +573,26 @@ export async function retrieveRelevantCharacters(
 
 /**
  * 混合检索相关 Wiki 条目（增强版）
+ * 
+ * 支持：
+ * - 别名匹配 (Alias System)
+ * - 关联扩展 (Wiki Relationships)
+ * - 时间切片 (Time Slicing) - 通过 currentChapterOrder 参数
+ * 
+ * @param query - 查询文本
+ * @param allEntries - 所有 Wiki 条目
+ * @param settings - 应用设置
+ * @param topK - 返回结果数量
+ * @param currentChapterOrder - 当前章节序号（用于时间切片）
+ * @param expandRelations - 是否扩展关联条目
  */
 export async function retrieveRelevantWikiEntries(
     query: string,
     allEntries: WikiEntry[],
     settings: AppSettings,
-    topK: number = 5
+    topK: number = 5,
+    currentChapterOrder?: number,
+    expandRelations: boolean = true
 ): Promise<WikiEntry[]> {
     if (allEntries.length === 0) return [];
     
@@ -570,6 +601,9 @@ export async function retrieveRelevantWikiEntries(
     const allQueryKeywords = expandedQueries.flatMap(q => extractKeywords(q));
     const uniqueKeywords = [...new Set(allQueryKeywords)];
     const useVector = supportsEmbedding(settings);
+    
+    // 🆕 导入 Wiki 服务函数
+    const { getAllNames, getRelatedEntries } = await import('./wikiService');
     
     try {
         let queryVector: number[] = [];
@@ -594,9 +628,19 @@ export async function retrieveRelevantWikiEntries(
                 }
             }
             
-            // 条目名直接匹配给予高分
-            const nameMatch = query.includes(entry.name) ? 0.5 : 0;
-            const entryText = `${entry.name} ${entry.category} ${entry.description}`;
+            // 🆕 别名匹配：检查主名称和所有别名
+            const allNames = getAllNames(entry);
+            let nameMatch = 0;
+            for (const name of allNames) {
+                if (name.length > 1 && query.includes(name)) {
+                    nameMatch = 0.5;
+                    break;
+                }
+            }
+            
+            // 🆕 构建包含别名的文本用于关键词匹配
+            const aliasText = entry.aliases?.join(' ') || '';
+            const entryText = `${entry.name} ${aliasText} ${entry.category} ${entry.description}`;
             keywordScore = keywordMatchScore(uniqueKeywords, entryText) + nameMatch;
             
             // 类别相关性加成
@@ -609,9 +653,36 @@ export async function retrieveRelevantWikiEntries(
             return { entry, score: finalScore, vectorScore, keywordScore };
         });
         
-        const validResults = scores
+        // 排序获取初步结果
+        const sortedScores = scores.sort((a, b) => b.score - a.score);
+        
+        // 🆕 关联扩展：为匹配的条目添加其关联条目
+        if (expandRelations) {
+            const topResults = sortedScores.slice(0, Math.ceil(topK / 2));
+            const relatedEntryIds = new Set<string>();
+            
+            for (const result of topResults) {
+                if (result.score > 0) {
+                    const related = getRelatedEntries(result.entry, allEntries);
+                    for (const rel of related) {
+                        relatedEntryIds.add(rel.entry.id);
+                    }
+                }
+            }
+            
+            // 为关联条目添加加成
+            for (const s of sortedScores) {
+                if (relatedEntryIds.has(s.entry.id)) {
+                    s.score += 0.15; // 关联加成
+                }
+            }
+            
+            // 重新排序
+            sortedScores.sort((a, b) => b.score - a.score);
+        }
+        
+        const validResults = sortedScores
             .filter(s => s.score >= SIMILARITY_THRESHOLD || s.score > 0)
-            .sort((a, b) => b.score - a.score)
             .slice(0, topK * 2);
         
         // 去重

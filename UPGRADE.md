@@ -1,158 +1,299 @@
-根据之前对 InkFlow 现有工作流缺陷的分析（主要是结构层级缺失、设定静态化、逻辑检查被动、风格单一化等问题），我为你草拟了一份系统升级需求文档（PRD）。
+# InkFlow 升级路线图
 
-这份文档旨在指导下一阶段的开发，将 InkFlow 从一个“AI 辅助写作工具”升级为“动态长篇小说创作系统”。
+> 本文档基于对 InkFlow 代码库的深度分析，总结当前系统架构的优势，并提出未来演进方向。
 
-InkFlow 系统升级需求文档 (PRD) v2.0
-版本：2.0 Draft 目标：解决长篇连贯性断层、设定动态演进滞后、文风同质化等核心痛点，构建“生长型”小说创作系统。
+## 📊 当前系统评估
 
-1. 核心问题陈述 (Problem Statement)
-基于现状分析，当前系统存在以下阻碍长篇创作的核心缺陷：
+### 核心工作流
 
-结构扁平：缺乏“分卷/剧情弧”层级，AI 难以把握宏观节奏。
+InkFlow 已建立完整的 **"结构化-写作-演进"闭环**：
 
-设定静态：角色与世界状态不随剧情发展自动更新，导致后期生成内容与设定脱节（如主角已升级，AI 仍按弱者描写）。
+```
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│  静态设定   │ -> │  动态规划   │ -> │  AI 写作    │ -> │  演进反馈   │
+│ 项目/世界观 │    │ 分卷/细纲   │    │ RAG + 续写  │    │ 状态更新    │
+│   角色创建  │    │  (Beats)    │    │             │    │             │
+└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
+                                              ↑                  │
+                                              └──────────────────┘
+```
 
-逻辑被动：RAG 仅做相关性检索，缺乏主动的逻辑冲突检查（吃书现象）。
+### ✅ 已实现的高级特性
 
-风格固化：缺乏对用户修改习惯的学习，生成的文风千篇一律。
+| 模块 | 特性 | 说明 |
+|------|------|------|
+| RAG 系统 | 本地化闭环 | IndexedDB 存储向量，零部署成本，保护隐私 |
+| RAG 系统 | 混合检索 | 向量相似度 + 关键词匹配，双重保障 |
+| RAG 系统 | 时间衰减 | 近期章节权重更高，模拟人类记忆 |
+| RAG 系统 | 关系扩散 | 检索角色时自动关联相关人物 |
+| Wiki 系统 | 分类加权 | 根据查询内容自动调整类别权重 |
+| Wiki 系统 | 增量索引 | Hash 校验，只更新变化内容 |
+| 演进系统 | 双向更新 | 正文 → 角色状态 / Wiki 条目 |
+| 跨服务商 | 场景化配置 | 不同任务使用不同 AI 模型 |
 
-细纲断层：细纲生成仅依赖摘要，缺乏对伏笔和细节的连续性捕捉。
+---
 
-2. 功能需求详情 (Functional Requirements)
-2.1 模块一：多层级剧情结构 (Hierarchical Plot Management) 已完成
-目标：引入“卷（Volume）”概念，建立书 -> 卷 -> 章 -> 细纲的四级结构。
+## 🚀 升级建议（按优先级排序）
 
-FR-1.1 分卷管理：
+### P0 - 核心体验优化
 
-新增 Volume 数据实体，包含：卷标题、卷摘要、本卷核心冲突、预期字数、起止章节。
+#### 1. 逻辑预检机制 (Logic Pre-flight Check)
+**问题**：RAG 只提供信息，AI 可能忽略，导致"吃书"
 
-UI 支持在左侧大纲栏进行“新建卷”、“将章节拖入卷”操作。
+**方案**：
+```typescript
+// 在生成正文前增加校验步骤
+async function preflightCheck(beats: string[], context: {
+  globalMemory: string,
+  activePlotLoops: PlotLoop[],
+  recentChapters: Chapter[]
+}): Promise<ConflictWarning[]>
+```
 
-FR-1.2 宏观节奏控制：
+**实现要点**：
+- 使用推理模型
+比对细纲与已有设定
+- 检测冲突时弹出警告，提供修正建议
+- 可选：自动修正 Prompt 约束
 
-AI 在生成章节时，需额外注入“当前卷摘要”和“本卷进度（如：处于高潮前夕）”作为 Context。
+**价值**：从源头防止逻辑崩坏，百万字长篇必备
 
-提供“分卷总结生成”功能：一卷结束后，AI 自动生成本卷详细回顾，作为下一卷的输入。
+---
 
-2.2 模块二：动态世界演进系统 (Dynamic World Evolution)
-目标：让设定（Wiki/Character）随剧情自动“生长”。
+#### 2. ✅ 风格学习闭环 (Adaptive Style Loop) - 已实现
+**问题**：AI 生成文本"AI 味"重，缺乏个人风格
 
-FR-2.1 状态变更检测 (State Change Detection)：
-
-触发时机：每章正文生成并保存后。
-
-功能：后台静默调用 AI 分析器，识别关键状态变更。
-
-示例：检测到“林曜突破至筑基期” -> 建议更新角色卡“境界”字段。
-
-示例：检测到“青云门被灭” -> 建议更新势力列表“青云门”状态为“已灭亡”。
-
-FR-2.2 变更提案 (Change Proposal)：
-
-UI 新增“世界变动通知”区域。AI 不直接修改数据库，而是生成“变更提案（Diff）”，用户点击“确认”后应用到 Wiki 或角色卡。
-
-FR-2.3 时间切片 (Time Slicing)：
-
-角色卡和 Wiki 支持“版本控制”。RAG 检索时，根据当前章节的时间点，检索对应版本的设定（如：写第 10 章时检索第 10 章时的角色状态）。
-
-2.3 模块三：逻辑一致性卫士 (Logic Consistency Guard)
-目标：从“相关性检索”升级为“冲突检测”。
-
-FR-3.1 逻辑预检 (Pre-flight Check)：
-
-在生成正文前，增加一个轻量级推理步骤。
-
-Prompt 逻辑：输入本章细纲 + 检索到的设定 -> 提问：“细纲中的情节是否与设定冲突？”（如：细纲写主角用剑，但设定里剑已断）。
-
-若发现冲突，弹窗警告用户，或自动在 System Prompt 中添加约束（Constraint）。
-
-FR-3.2 伏笔回收追踪 (Plot Hole Tracker)：已完成
-
-新增 OpenLoops（未闭环情节）数据结构。
-
-用户或 AI 可标记某段情节为“伏笔”。
-
-在生成后续大纲时，系统强制提示未回收的伏笔列表。
-
-2.4 模块四：自适应风格引擎 (Adaptive Style Engine)
-目标：让 AI 越写越像用户。
-
-FR-4.1 风格采样 (Style Sampling)：
-
-新增 StyleVectorStore（风格向量库）。
-
-当用户大幅度修改 AI 生成的文本（改动率 > 30%）并保存时，系统自动将用户的最终版本作为“正样本”存入风格库。
-
-FR-4.2 动态少样本提示 (Dynamic Few-Shot)：
-
-生成新章节时，从风格库中检索 3-5 段与当前情境（如战斗、对话、景物）相似的用户手写片段。
-
-将其作为 Examples 注入 Prompt，指令 AI：“模仿以下片段的笔法和用词习惯”。
-
-2.5 模块五：深度上下文细纲 (Deep Context Beats)
-目标：解决细纲生成“断气”问题。
-
-FR-5.1 上下文滑动窗口增强：
-
-细纲生成不仅仅依赖摘要，需读取上一章的结尾 500 字（确保场景衔接）和上一章的遗留钩子（Hook）。
-
-FR-5.2 交互式细纲打磨：
-
-细纲生成改为对话式。AI 生成初版 -> 用户：“增加点打斗” -> AI 调整 -> 确认。
-
-3. 数据结构变更建议 (Schema Updates)
-为了支持上述功能，types.ts 需要进行如下扩展：
-
-TypeScript
-
-// 新增：分卷结构
-export interface Volume {
+**方案**：
+```typescript
+interface StyleSample {
   id: string;
-  title: string;
-  summary: string;
-  order: number;
-  chapterIds: string[]; // 包含的章节ID
+  content: string;      // 用户最终稿
+  originalAI: string;   // AI 原始生成
+  editRatio: number;    // 修改比例
+  vector: number[];     // 风格向量
 }
+```
 
-// 扩展：角色增加状态历史
-export interface CharacterState {
-  timestamp: number; // 对应章节ID或时间戳
-  description: string; // 当时的状态描述
-  level: string; // 当时的等级/境界
+**已实现功能**：
+- ✅ `services/styleService.ts` - 风格学习核心服务
+- ✅ 基于 n-gram 的编辑比例计算算法
+- ✅ 当用户修改率 > 30% 时，自动存入风格向量库
+- ✅ 生成时检索相似风格样本作为 Few-Shot 示例
+- ✅ 风格提示词注入到 AI 生成流程
+- ✅ UI 显示风格学习统计和保存通知
+- ✅ 单元测试覆盖核心功能
+
+**价值**：让 AI 越用越懂你
+
+---
+
+### P1 - 功能增强
+
+#### 3. 逆向大纲修正 (Recursive Re-outlining)
+**问题**：正文偏离大纲后，后续章节基于"过期计划"生成
+
+**方案**：
+- 章节完成后，evolutionService 检测剧情偏离度
+- 偏离较大时提示："检测到剧情偏离，是否重新生成后续大纲？"
+- 支持局部重生成（只更新受影响的章节）
+
+**价值**：保持大纲鲜活度，适应创作中的灵感涌现
+
+---
+
+#### 4. ✅ Wiki 别名系统 (Alias System) - 已实现
+**问题**：检索依赖精确名称，无法识别别称
+
+**方案**：
+```typescript
+interface WikiEntry {
+  // ... existing fields
+  aliases?: string[];  // 别名列表，如 ["张麻子", "三爷"]
 }
+```
 
-export interface Character {
-  // ... 原有字段
-  history: CharacterState[]; // 状态演变历史
+**已实现功能**：
+- ✅ `services/wikiService.ts` - Wiki 增强服务
+- ✅ `addAlias()` / `removeAlias()` - 别名管理
+- ✅ `getAllNames()` - 获取主名称和所有别名
+- ✅ `matchesEntry()` - 支持别名匹配的文本检索
+- ✅ `buildAliasIndex()` - 构建别名索引用于快速查找
+- ✅ `findEntryByNameOrAlias()` - 通过名称或别名查找条目
+- ✅ UI 支持别名的添加、删除和显示
+- ✅ 搜索功能支持别名匹配
+
+**价值**：提升检索召回率，适应小说中的多称谓场景
+
+---
+
+#### 5. ✅ Wiki 时间切片 (Time Slicing) - 已实现
+**问题**：Wiki 描述静态覆盖，回改旧章节时获取错误信息
+
+**场景**：第 100 章更新"倚天剑已断"，回改第 50 章时 AI 误以为剑已断
+
+**方案**：
+```typescript
+interface WikiHistoryEntry {
+  chapterId: string;
+  chapterOrder: number;
+  content: string;
+  timestamp: number;
+  changeNote?: string;
 }
+```
 
-// 扩展：章节增加伏笔标记
-export interface Chapter {
-  // ... 原有字段
-  volumeId?: string; // 所属分卷
-  openLoops?: string[]; // 本章开启的伏笔
-  closedLoops?: string[]; // 本章回收的伏笔
+**已实现功能**：
+- ✅ `addHistoryEntry()` - 添加历史版本记录
+- ✅ `getDescriptionAtChapter()` - 获取指定章节时间点的描述
+- ✅ `getHistoryTimeline()` - 获取完整历史时间线
+- ✅ `pruneHistory()` - 清理过期历史版本
+- ✅ `autoRecordHistory()` - 自动检测并记录描述变更
+- ✅ UI 支持查看特定章节时的描述版本
+- ✅ UI 显示历史变更时间线
+
+**价值**：支持非线性编辑，防止时间线错乱
+
+---
+
+### P2 - 架构升级
+
+#### 6. ✅ 深度图谱检索 (Graph RAG) - 已实现
+**问题**：当前关系检索只有单层，无法捕捉深层人物纠葛
+
+**方案**：
+```typescript
+// 二度人脉检索
+function retrieveWithGraph(characterId: string, depth: number = 2): Character[] {
+  // BFS 遍历关系图谱
 }
+```
 
-// 新增：风格样本
-export interface StyleSample {
-  id: string;
-  text: string;
-  type: 'combat' | 'dialogue' | 'scenery'; // 样本类型
-  embedding: number[];
+**已实现功能**：
+- ✅ `services/graphService.ts` - 深度图谱检索核心服务
+- ✅ BFS 遍历关系图谱，支持配置检索深度（默认 2 层）
+- ✅ 关系类型加权（仇人 1.0 > 恋人 0.9 > 父母 0.85 > 朋友 0.6 > 路人 0.2）
+- ✅ 距离衰减（越远的关系权重越低，衰减系数 0.6）
+- ✅ `retrieveWithGraph()` - 深度图谱检索
+- ✅ `getNDegreeConnections()` - 获取 N 度人脉
+- ✅ `findRelationshipPath()` - 查找两个角色之间的关系路径
+- ✅ `getRelationshipSummary()` - 生成关系网络摘要
+- ✅ 集成到 `retrieveRelevantCharacters()` 函数
+- ✅ 23 个单元测试全部通过
+
+**价值**：处理复杂人物纠葛，写出更深层的人际互动
+
+---
+
+#### 7. 性能优化 (WASM Vector Search)
+**问题**：百万字级别时，JS 内存遍历向量可能卡顿
+
+**方案**：
+- 引入 WASM 版向量计算库（如 usearch-wasm）
+- 或使用前端向量库（如 Voy）
+- 实现分片索引，按需加载
+
+**触发条件**：向量数 > 10000 时启用优化
+
+---
+
+#### 8. ✅ Wiki 关联图谱 (Wiki Relationships) - 已实现
+**问题**：Wiki 条目孤立，无法表达归属关系
+
+**方案**：
+```typescript
+type WikiRelationType = 'belongs_to' | 'part_of' | 'created_by' | 'located_in' | 'related_to';
+
+interface WikiRelationship {
+  targetId: string;
+  relation: WikiRelationType;
+  description?: string;
 }
-4. 开发优先级建议 (Roadmap)
-P0 (最高优先级)：数据结构升级（引入 Volume 和 CharacterHistory），这是地基。
+```
 
-P1 (核心体验)：自适应风格引擎。这是用户感知最强的功能，能显著减少用户的润色工作量。
+**已实现功能**：
+- ✅ `addRelationship()` / `removeRelationship()` - 关联管理
+- ✅ `getRelatedEntries()` - 获取出向关联条目
+- ✅ `getIncomingRelationships()` - 获取入向关联
+- ✅ `buildRelationshipGraph()` - 构建完整关联图谱
+- ✅ `getRelationTypeLabel()` / `getInverseRelationLabel()` - 关系类型中文标签
+- ✅ `enhancedWikiRetrieval()` - 增强版检索，支持关联扩展
+- ✅ `buildWikiContextPrompt()` - 生成包含关联信息的 AI 提示词
+- ✅ UI 支持添加、删除和查看关联关系
+- ✅ UI 显示出向和入向关联
 
-P2 (长期价值)：动态世界演进。对于 50 万字以上的小说至关重要。
+**场景**：
+- "青云剑" belongs_to "林风"
+- "青云决" part_of "青云门"
 
-P3 (完善)：逻辑一致性卫士。技术实现难度较大，可后期迭代。
+**价值**：检索角色时自动带出其装备/功法
 
-这份文档可以直接作为下一阶段开发的任务清单（Backlog）。
+---
 
+### P3 - 体验增强
 
-在初始化时只需要生成重要角色
+#### 9. 编辑器 Wiki 高亮 (Inline Wiki Hints)
+**方案**：
+- 利用 Tiptap 插件机制，自动高亮正文中的 Wiki 词汇
+- 鼠标悬停显示 Wiki 悬浮卡片
+- 点击跳转到 Wiki 详情
 
-后续的角色应该是服务当前剧情的，所以需要参考上下文及本卷意图
+**价值**：所见即所得，减少上下文切换
+
+---
+
+#### 10. 多模态构思 (Visual Brainstorming)
+**方案**：
+- CharacterForge 增加"AI 绘图"功能，生成角色立绘
+- StructureDesigner 支持地图概念图生成
+- Wiki 条目支持图片附件
+
+**价值**：视觉化刺激灵感，帮助作者更具体地描写场景
+
+---
+
+## 📈 实施路线
+
+```
+Phase 1 (核心)          Phase 2 (增强)          Phase 3 (优化)
+─────────────────────────────────────────────────────────────────
+[P0] 逻辑预检 ✅        [P1] 逆向大纲修正       [P2] Graph RAG ✅
+[P0] 风格学习 ✅        [P1] Wiki 别名 ✅       [P2] WASM 优化
+                        [P1] Wiki 时间切片 ✅   [P2] Wiki 关联 ✅
+                                                [P3] 编辑器高亮
+                                                [P3] 多模态构思
+```
+
+---
+
+## 💡 总结
+
+InkFlow 当前已是一个**架构先进、功能完善**的 AI 写作工具，RAG 系统的混合检索和领域优化超越了大多数开源方案。
+
+下一步演进方向：**从"辅助生成"走向"深度协同"**
+
+| 能力 | 当前 | 目标 |
+|------|------|------|
+| 写 | ✅ RAG 增强生成 | 风格自适应 |
+| 学 | ✅ 风格学习闭环 | 学习用户笔癖 |
+| 查 | ✅ 混合检索 + 深度图谱 + Wiki 增强 | 逻辑预检 + 图谱检索 |
+| 看 | ✅ 视频生成 | 多模态构思辅助 |
+
+让系统不仅能写，还能**学（学习风格）、查（逻辑纠错）、看（多模态构思）**。
+
+---
+
+## 📝 最近更新
+
+### 2024-12 Wiki 系统增强
+
+完成了 Wiki 系统的三大增强功能：
+
+1. **别名系统** - 支持为 Wiki 条目添加多个别名，检索时自动匹配所有称谓
+2. **时间切片** - 支持查看 Wiki 条目在不同章节时间点的描述版本，防止非线性编辑时的时间线错乱
+3. **关联图谱** - 支持 Wiki 条目之间的关系管理（属于、包含、创造、位于等），检索时自动扩展关联条目
+
+UI 更新：
+- 重构 WikiSystem 组件，采用三栏布局（列表 + 详情 + AI 扫描）
+- 详情面板支持四个标签页：基本信息、别名管理、关联管理、历史查看
+- 列表项显示别名标签和关联/历史指示器
+- 搜索功能支持别名匹配

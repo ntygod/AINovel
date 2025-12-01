@@ -208,12 +208,51 @@ export interface MapRegion {
 
 export type WikiCategory = 'Item' | 'Skill' | 'Location' | 'Event' | 'Organization' | 'Person' | 'Other';
 
+/**
+ * Wiki 关联关系类型
+ */
+export type WikiRelationType = 
+  | 'belongs_to'    // 属于（如：青云剑 belongs_to 林风）
+  | 'part_of'       // 是...的一部分（如：青云决 part_of 青云门）
+  | 'created_by'    // 由...创造（如：倚天剑 created_by 张三丰）
+  | 'located_in'    // 位于（如：藏经阁 located_in 青云门）
+  | 'related_to';   // 相关（通用关系）
+
+/**
+ * Wiki 关联关系
+ */
+export interface WikiRelationship {
+  targetId: string;           // 目标 Wiki 条目 ID
+  relation: WikiRelationType; // 关系类型
+  description?: string;       // 关系描述（可选）
+}
+
+/**
+ * Wiki 历史版本（时间切片）
+ */
+export interface WikiHistoryEntry {
+  chapterId: string;          // 变更发生的章节 ID
+  chapterOrder: number;       // 章节序号（用于快速比较）
+  content: string;            // 该时间点的描述内容
+  timestamp: number;          // 变更时间戳
+  changeNote?: string;        // 变更说明（可选）
+}
+
 export interface WikiEntry {
   id: string;
   name: string;
   category: WikiCategory;
   description: string;
   firstAppearanceChapterId?: string; // Tracking where it first appeared
+  
+  // 🆕 别名系统 (Alias System)
+  aliases?: string[];         // 别名列表，如 ["张麻子", "三爷", "县长"]
+  
+  // 🆕 时间切片 (Time Slicing)
+  history?: WikiHistoryEntry[]; // 历史版本列表，按章节顺序排列
+  
+  // 🆕 关联图谱 (Wiki Relationships)
+  relationships?: WikiRelationship[]; // 与其他 Wiki 条目的关系
 }
 
 export interface WorldStructure {

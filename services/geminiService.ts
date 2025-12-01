@@ -1835,7 +1835,8 @@ export const streamChapterContent = async function* (
     volumes: Volume[] = [], 
     plotLoops: PlotLoop[] = [],
     wikiEntries: WikiEntry[] = [],
-    factions: Faction[] = []
+    factions: Faction[] = [],
+    stylePrompt: string = '' // 🆕 风格学习提示词
 ) {
     const context = buildNovelContext(config);
     
@@ -2081,6 +2082,7 @@ ${beats ? `## 本章细纲 (Step Outline - 必须严格按顺序扩写):\n- ${be
 ${hooksToResolve.length > 0 ? '### 4. 伏笔处理\n- 必须自然地回应上述伏笔，推进悬念的解决\n' : ''}
 ${volumeContext ? '### 5. 分卷节奏\n- 符合当前分卷的核心冲突和整体节奏\n' : ''}
 ${plotLoopContext ? '### 6. 伏笔追踪\n- 在内容中自然地推进或回收伏笔追踪中的悬念\n' : ''}
+${stylePrompt ? stylePrompt : ''}
 
 # 排版格式系统 (必须严格遵守):
 1. **强制双换行**: 每个自然段之间必须使用**两个换行符**（即空一行）。严禁输出密集的大段文字。
@@ -2240,12 +2242,22 @@ export const streamTextPolish = async function* (text: string, instruction: stri
 
 export const analyzeChapterForWiki = async (content: string, existingNames: string[], settings: AppSettings, config: NovelConfig): Promise<WikiEntry[]> => {
     const prompt = `
-        Analyze the text and extract new Wiki Entries (Items, Skills, Locations, Persons, Organizations).
-        Ignore these existing entries: ${existingNames.join(', ')}.
-        Text: ${content.slice(0, 10000)}...
-        
-        Return JSON array: name, category, description.
-    `;
+分析以下小说文本，提取新出现的专有名词（物品、功法、地点、人物、组织等）。
+忽略这些已存在的词条：${existingNames.join('、') || '无'}
+
+文本内容：
+${content.slice(0, 8000)}
+
+请返回 JSON 数组，每个元素包含：
+- name: 名称
+- category: 分类（Item/Skill/Location/Person/Organization/Event/Other）
+- description: 简短描述（50字以内）
+
+只返回 JSON 数组，不要其他内容。示例格式：
+[{"name":"青云剑","category":"Item","description":"一把上古神剑"}]
+    `.trim();
+    
+    console.log('[analyzeChapterForWiki] Provider:', settings.provider);
     
     if (settings.provider === 'google') {
         const ai = getGoogleAI(settings);
@@ -2270,7 +2282,47 @@ export const analyzeChapterForWiki = async (content: string, existingNames: stri
         const raw = JSON.parse(res.text || "[]");
         return raw.map((r: any) => ({ ...r, id: crypto.randomUUID() }));
     }
-    return [];
+    
+    // 其他 provider (OpenAI/DeepSeek/Custom) 使用 OpenAI 兼容 API
+    const resolvedConfig = resolveSceneConfig(settings, 'analysis');
+    const response = await fetch(`${resolvedConfig.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${resolvedConfig.apiKey}`
+        },
+        body: JSON.stringify({
+            model: resolvedConfig.model,
+            messages: [
+                { role: 'system', content: '你是一个专业的小说分析助手，擅长从文本中提取专有名词。只返回 JSON 数组。' },
+                { role: 'user', content: prompt }
+            ],
+            temperature: 0.3,
+            response_format: { type: 'json_object' }
+        })
+    });
+    
+    if (!response.ok) {
+        console.error('[analyzeChapterForWiki] API error:', response.status, await response.text());
+        return [];
+    }
+    
+    const data = await response.json();
+    const text = data.choices?.[0]?.message?.content || '[]';
+    console.log('[analyzeChapterForWiki] Response:', text);
+    
+    try {
+        // 尝试解析 JSON
+        let parsed = JSON.parse(text);
+        // 如果返回的是对象而不是数组，尝试提取数组
+        if (!Array.isArray(parsed)) {
+            parsed = parsed.entries || parsed.items || parsed.results || [];
+        }
+        return parsed.map((r: any) => ({ ...r, id: crypto.randomUUID() }));
+    } catch (e) {
+        console.error('[analyzeChapterForWiki] JSON parse error:', e);
+        return [];
+    }
 };
 
 export const indexContent = async (record: Partial<VectorRecord>, settings: AppSettings) => {
@@ -2609,6 +2661,50 @@ function writeString(view: DataView, offset: number, string: string) {
  * @param config - The SceneModelConfig to test
  * @returns Promise<boolean> - true if test succeeds, throws error if fails
  */
+/**
+ * 通用 AI 调用函数 - 用于预检等场景
+ * @param prompt - 提示词
+ * @param config - 模型配置
+ * @returns Promise<string> - AI 响应文本
+ */
+export async function callAIWithConfig(
+    prompt: string,
+    config: { provider: string; apiKey: string; baseUrl: string; model: string },
+    options: { temperature?: number; maxTokens?: number } = {}
+): Promise<string> {
+    const { temperature = 0.7, maxTokens = 2000 } = options;
+    
+    if (config.provider === 'google') {
+        const aiOptions: any = { apiKey: config.apiKey || '' };
+        if (config.baseUrl) {
+            setDefaultBaseUrls({ geminiUrl: config.baseUrl });
+        }
+        const ai = new GoogleGenAI(aiOptions);
+        
+        const response = await ai.models.generateContent({
+            model: config.model,
+            contents: prompt,
+            config: {
+                temperature,
+                maxOutputTokens: maxTokens
+            }
+        });
+        
+        return response.text || '';
+    } else {
+        // OpenAI-compatible API
+        const baseUrl = config.baseUrl || 'https://api.openai.com/v1';
+        const result = await callOpenAI(
+            baseUrl,
+            config.apiKey,
+            config.model,
+            [{ role: 'user', content: prompt }],
+            false
+        );
+        return result || '';
+    }
+}
+
 export async function testSceneConfig(config: SceneModelConfig): Promise<boolean> {
     const testPrompt = '请回复"OK"';
     
